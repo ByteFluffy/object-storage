@@ -1,0 +1,56 @@
+{
+  "name": "object-storage",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared object storage operations for server upload, browser direct upload, and explicit finalize. Not yet published.",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
+    },
+    "./drivers/memory": {
+      "types": "./dist/drivers/memory.d.ts",
+      "import": "./dist/drivers/memory.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run tests/unit tests/package/entry-boundary.test.ts",
+    "test:package": "vitest run tests/package",
+    "test:integration": "node scripts/integration-pending.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "3.1007.0",
+    "@aws-sdk/s3-request-presigner": "3.1007.0",
+    "@volcengine/tos-sdk": "2.9.1",
+    "sharp": "0.34.5"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": { "optional": true },
+    "@aws-sdk/s3-request-presigner": { "optional": true },
+    "@volcengine/tos-sdk": { "optional": true },
+    "sharp": { "optional": true }
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "3.1007.0",
+    "@aws-sdk/s3-request-presigner": "3.1007.0",
+    "@types/node": "22.19.1",
+    "@volcengine/tos-sdk": "2.9.1",
+    "sharp": "0.34.5",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}
