@@ -20,6 +20,34 @@
     "./drivers/memory": {
       "types": "./dist/drivers/memory.d.ts",
       "import": "./dist/drivers/memory.js"
+    },
+    "./drivers/tos": {
+      "types": "./dist/drivers/tos.d.ts",
+      "import": "./dist/drivers/tos.js"
+    },
+    "./drivers/s3": {
+      "types": "./dist/drivers/s3.d.ts",
+      "import": "./dist/drivers/s3.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./plugins/probe": {
+      "types": "./dist/plugins/probe/index.d.ts",
+      "import": "./dist/plugins/probe/index.js"
+    },
+    "./plugins/cleanup": {
+      "types": "./dist/plugins/cleanup/index.d.ts",
+      "import": "./dist/plugins/cleanup/index.js"
+    },
+    "./plugins/image": {
+      "types": "./dist/plugins/image/index.d.ts",
+      "import": "./dist/plugins/image/index.js"
+    },
+    "./plugins/media": {
+      "types": "./dist/plugins/media/index.d.ts",
+      "import": "./dist/plugins/media/index.js"
     }
   },
   "scripts": {
