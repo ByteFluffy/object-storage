@@ -96,6 +96,92 @@ describe('cleanObjects', () => {
     expect(await inner.stat({ storageId: 'local', key: 'same' })).toBeNull();
     expect(await inner.stat({ storageId: 'local', key: 'near' })).not.toBeNull();
   });
+
+  it('does not delete another storage and continues after a delete failure', async () => {
+    const inner = createMemoryDriver({ storageId: 'local' });
+    await put(inner, 'second', 'still here');
+    const deleted: string[] = [];
+    const driver: StorageDriver = {
+      ...inner,
+      async delete(ref) {
+        deleted.push(ref.key);
+        if (ref.key === 'first') throw new StorageError('unavailable', 'delete failed');
+        await inner.delete(ref);
+      },
+    };
+
+    const results = await cleanObjects({
+      driver,
+      items: [
+        { ref: { storageId: 'other', key: 'foreign' }, generation: '1' },
+        { ref: { storageId: 'local', key: 'first' }, generation: '1' },
+        { ref: { storageId: 'local', key: 'second' }, generation: '1' },
+      ],
+      currentGeneration: () => '1',
+    });
+
+    expect(results.map((result) => result.code ?? result.status)).toEqual([
+      'storage_mismatch',
+      'delete_failed',
+      'deleted',
+    ]);
+    expect(deleted).toEqual(['first', 'second']);
+    expect(await inner.stat({ storageId: 'local', key: 'second' })).toBeNull();
+  });
+
+  it('aborts only the upload ids the caller registered', async () => {
+    const aborted: string[] = [];
+    const driver: StorageDriver = {
+      storageId: 'local',
+      capabilities: {
+        put: true,
+        copy: false,
+        conditionalWrite: { ifNoneMatch: true },
+        checksums: ['sha256'],
+        presignMethods: ['PUT'],
+        multipart: { minPartBytes: 5, maxPartBytes: 10 },
+      },
+      async put() {
+        throw new Error('put');
+      },
+      async stat() {
+        return null;
+      },
+      async read() {
+        throw new Error('read');
+      },
+      async copy() {
+        throw new Error('copy');
+      },
+      async delete() {
+        throw new Error('delete');
+      },
+      async abortMultipart(input) {
+        aborted.push(input.uploadId);
+      },
+    };
+
+    const results = await cleanObjects({
+      driver,
+      items: [],
+      uploads: [
+        { ref: { storageId: 'other', key: 'a' }, uploadId: 'foreign-upload' },
+        { ref: { storageId: 'local', key: 'a' }, uploadId: 'listed-upload' },
+      ],
+      currentGeneration: () => null,
+    });
+
+    expect(aborted).toEqual(['listed-upload']);
+    expect(results).toEqual([
+      {
+        ref: { storageId: 'other', key: 'a' },
+        status: 'failed',
+        code: 'storage_mismatch',
+        uploadId: 'foreign-upload',
+      },
+      { ref: { storageId: 'local', key: 'a' }, status: 'aborted', uploadId: 'listed-upload' },
+    ]);
+  });
 });
 
 describe('cleanWorkspace', () => {
