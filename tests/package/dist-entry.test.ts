@@ -10,7 +10,8 @@ import { checkObject } from '../../dist/plugins/probe/index.js';
 import { cleanObjects } from '../../dist/plugins/cleanup/index.js';
 import { createTosDriver } from '../../dist/drivers/tos.js';
 import { createS3Driver } from '../../dist/drivers/s3.js';
-import { createSinglePutPlan } from '../../dist/server/index.js';
+import { createSingleGetPlan, createSinglePutPlan } from '../../dist/server/index.js';
+import { assessDelivery } from '../../dist/delivery/fit.js';
 
 describe('built package entries', () => {
   it('loads the server and browser entries from dist', () => {
@@ -37,6 +38,8 @@ describe('built package entries', () => {
     expect(typeof createTosDriver).toBe('function');
     expect(typeof createS3Driver).toBe('function');
     expect(typeof createSinglePutPlan).toBe('function');
+    expect(typeof createSingleGetPlan).toBe('function');
+    expect(typeof assessDelivery).toBe('function');
   });
 });
 

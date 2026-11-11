@@ -10,6 +10,8 @@
 - [x] 探测必须有可比较的证据，HEAD 必须带 HEAD 签名
 - [x] 清理核对 storageId，删除失败继续，只终止登记的分片
 - [x] 构建后的根入口不引入 Sharp、FFmpeg 或云 SDK
+- [x] GET 预签名
+- [x] 交付约束判断，只指出现有处理函数
 - [ ] 真实桶集成
 - [ ] npm 发布
 - [ ] 镜像到 starrank-soft

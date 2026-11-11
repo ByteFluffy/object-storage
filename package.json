@@ -33,6 +33,10 @@
       "types": "./dist/server/index.d.ts",
       "import": "./dist/server/index.js"
     },
+    "./delivery": {
+      "types": "./dist/delivery/fit.d.ts",
+      "import": "./dist/delivery/fit.js"
+    },
     "./plugins/probe": {
       "types": "./dist/plugins/probe/index.d.ts",
       "import": "./dist/plugins/probe/index.js"
