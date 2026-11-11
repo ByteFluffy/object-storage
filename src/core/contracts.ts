@@ -155,6 +155,7 @@ export type FinalizeRequest = Readonly<{
   tempKey: string;
   finalKey: string;
   expectedChecksum: Checksum;
+  maxReadBytes?: number;
   signal?: AbortSignal;
 }>;
 

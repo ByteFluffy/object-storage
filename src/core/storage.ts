@@ -51,15 +51,16 @@ export class Storage {
       throw new StorageError('capability_unsupported', 'only sha256 checksums are verified');
     }
 
-    const temp = await driver.stat({ storageId: request.storageId, key: request.tempKey });
+    const tempRef = { storageId: request.storageId, key: request.tempKey };
+    const temp = await driver.stat(tempRef);
     if (!temp) throw new StorageError('not_found', 'temp object not found');
-    if (temp.checksum?.algorithm !== 'sha256' || temp.checksum.value !== request.expectedChecksum.value) {
-      throw new StorageError('checksum_mismatch', 'temp object checksum does not match');
-    }
+    await sha256Of(driver, tempRef, temp, request.expectedChecksum.value, request.maxReadBytes);
 
     const finalRef = { storageId: request.storageId, key: request.finalKey };
     const existing = await driver.stat(finalRef);
-    if (existing) return reuseOrReject(request.storageId, finalRef.key, existing, request.expectedChecksum.value);
+    if (existing) {
+      return reuseOrReject(driver, finalRef, existing, request.expectedChecksum.value, request.maxReadBytes);
+    }
 
     try {
       await driver.copy({
@@ -71,17 +72,17 @@ export class Storage {
     } catch (error) {
       if (error instanceof StorageError && error.code === 'conflict') {
         const raced = await driver.stat(finalRef);
-        if (raced) return reuseOrReject(request.storageId, finalRef.key, raced, request.expectedChecksum.value);
+        if (raced) {
+          return reuseOrReject(driver, finalRef, raced, request.expectedChecksum.value, request.maxReadBytes);
+        }
       }
       throw error;
     }
 
     const sealed = await driver.stat(finalRef);
-    if (!sealed?.checksum) throw new StorageError('checksum_mismatch', 'sealed object has no checksum');
-    if (sealed.checksum.value !== request.expectedChecksum.value) {
-      throw new StorageError('checksum_mismatch', 'sealed object checksum does not match');
-    }
-    return resultOf(request.storageId, finalRef.key, sealed.byteLength, sealed.checksum, sealed.etag, false);
+    if (!sealed) throw new StorageError('not_found', 'sealed object not found');
+    const sealedChecksum = await sha256Of(driver, finalRef, sealed, request.expectedChecksum.value, request.maxReadBytes);
+    return resultOf(request.storageId, finalRef.key, sealed.byteLength, sealedChecksum, sealed.etag, false);
   }
 
   async stat(ref: ObjectRef): Promise<ObjectStat | null> {
@@ -135,16 +136,37 @@ function assertExpectedChecksum(expected: Checksum | undefined, actual: Checksum
   }
 }
 
-function reuseOrReject(
-  storageId: string,
-  key: string,
+async function reuseOrReject(
+  driver: StorageDriver,
+  ref: ObjectRef,
   existing: ObjectStat,
   expected: string,
-): UploadResult {
-  if (existing.checksum?.algorithm === 'sha256' && existing.checksum.value === expected) {
-    return resultOf(storageId, key, existing.byteLength, existing.checksum, existing.etag, true);
+  maxReadBytes: number | undefined,
+): Promise<UploadResult> {
+  const checksum = await sha256Of(driver, ref, existing, expected, maxReadBytes);
+  return resultOf(ref.storageId, ref.key, existing.byteLength, checksum, existing.etag, true);
+}
+
+async function sha256Of(
+  driver: StorageDriver,
+  ref: ObjectRef,
+  stat: ObjectStat,
+  expected: string,
+  maxReadBytes: number | undefined,
+): Promise<Checksum> {
+  if (stat.checksum?.algorithm === 'sha256') {
+    if (stat.checksum.value !== expected) {
+      throw new StorageError('checksum_mismatch', 'object checksum does not match');
+    }
+    return stat.checksum;
   }
-  throw new StorageError('conflict', 'final object has different content');
+  if (maxReadBytes === undefined || stat.byteLength > maxReadBytes) {
+    throw new StorageError('checksum_mismatch', 'object has no sha256 checksum');
+  }
+  const loaded = await driver.read(ref);
+  const actual = sha256Checksum(loaded.data);
+  if (actual.value !== expected) throw new StorageError('checksum_mismatch', 'object checksum does not match');
+  return actual;
 }
 
 function resultOf(

@@ -37,6 +37,61 @@ describe('Storage.finalize', () => {
     expect(new TextDecoder().decode(tempObject.data)).toBe('abc');
   });
 
+  it('reads the temp object when the driver stat has no sha256', async () => {
+    const data = new TextEncoder().encode('abc');
+    const storage = createStorage({
+      drivers: [createMemoryDriver({ storageId: 'local' })],
+    });
+    await storage.upload({
+      storageId: 'local',
+      key: 'temp/abc.txt',
+      source: { kind: 'bytes', data },
+    });
+    const inner = storage;
+    const driver = {
+      storageId: 'local',
+      capabilities: {
+        put: true,
+        copy: true,
+        conditionalWrite: { ifNoneMatch: true },
+        checksums: ['sha256'],
+        presignMethods: [],
+        multipart: null,
+      },
+      async put() {
+        throw new Error('put');
+      },
+      async stat(ref: { storageId: string; key: string }) {
+        const found = await inner.stat(ref);
+        return found === null ? null : { ...found, checksum: null };
+      },
+      async read(ref: { storageId: string; key: string }) {
+        return inner.read(ref);
+      },
+      async copy(input: { from: { key: string }; to: { key: string }; ifNoneMatch?: '*' }) {
+        const loaded = await inner.read({ storageId: 'local', key: input.from.key });
+        await inner.upload({
+          storageId: 'local',
+          key: input.to.key,
+          source: { kind: 'bytes', data: loaded.data },
+          precondition: input.ifNoneMatch === undefined ? undefined : { ifNoneMatch: input.ifNoneMatch },
+        });
+      },
+      async delete() {
+        throw new Error('delete');
+      },
+    };
+    const checked = createStorage({ drivers: [driver] });
+    const sealed = await checked.finalize({
+      storageId: 'local',
+      tempKey: 'temp/abc.txt',
+      finalKey: 'final/from-read.txt',
+      expectedChecksum: { algorithm: 'sha256', value: ABC_SHA256 },
+      maxReadBytes: data.byteLength,
+    });
+    expect(sealed.checksum?.value).toBe(ABC_SHA256);
+  });
+
   it('reuses the final object when the same checksum is sealed again', async () => {
     const storage = await sealedFixture();
     const request = {
@@ -77,7 +132,7 @@ describe('Storage.finalize', () => {
           value: createHash('sha256').update('zzz').digest('hex'),
         },
       }),
-    ).rejects.toMatchObject({ code: 'conflict' });
+    ).rejects.toMatchObject({ code: 'checksum_mismatch' });
 
     const stored = await storage.read({ storageId: 'local', key: 'final/abc.txt' });
     expect(new TextDecoder().decode(stored.data)).toBe('abc');
