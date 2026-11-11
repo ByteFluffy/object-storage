@@ -12,6 +12,6 @@
 - [x] 构建后的根入口不引入 Sharp、FFmpeg 或云 SDK
 - [x] GET 预签名
 - [x] 交付约束判断，只指出现有处理函数
-- [ ] 真实桶集成
+- [x] 真实桶集成：密钥留在运行环境，测试只写 `object-storage-smoke/` 前缀并删除
 - [ ] npm 发布
 - [ ] 镜像到 starrank-soft
