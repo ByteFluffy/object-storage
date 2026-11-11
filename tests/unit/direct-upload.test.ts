@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createMemoryDriver } from '../../src/drivers/memory.js';
-import { createSinglePutPlan } from '../../src/server/direct-upload.js';
+import { createSingleGetPlan, createSinglePutPlan } from '../../src/server/direct-upload.js';
 import type { DirectUploadPlan, Source, StorageDriver } from '../../src/core/contracts.js';
 
 function unreadStream(): { source: Source; pulled: () => boolean } {
@@ -53,6 +53,10 @@ function presigningDriver(): { driver: StorageDriver; calls: unknown[] } {
         headers: input.contentType === undefined ? {} : { 'content-type': input.contentType },
       };
       return plan;
+    },
+    async presignGet(input) {
+      calls.push(input);
+      return { method: 'GET' as const, url: 'https://signed.example/object?get=1', headers: {} };
     },
   };
   return { driver, calls };
@@ -108,5 +112,34 @@ describe('createSinglePutPlan', () => {
     ).rejects.toMatchObject({ code: 'capability_unsupported' });
     expect(calls).toEqual([]);
     expect(source.pulled()).toBe(false);
+  });
+});
+
+describe('createSingleGetPlan', () => {
+  it('returns a GET plan for the caller expiry', async () => {
+    const { driver, calls } = presigningDriver();
+    const plan = await createSingleGetPlan(driver, {
+      object: { storageId: 'cloud', key: 'a.bin' },
+      expiresInSeconds: 90,
+    });
+
+    expect(plan).toEqual({ method: 'GET', url: 'https://signed.example/object?get=1', headers: {} });
+    expect(calls).toEqual([{ object: { storageId: 'cloud', key: 'a.bin' }, expiresInSeconds: 90 }]);
+  });
+
+  it('rejects a driver that cannot presign GET', async () => {
+    await expect(
+      createSingleGetPlan(createMemoryDriver({ storageId: 'local' }), {
+        object: { storageId: 'local', key: 'a.bin' },
+        expiresInSeconds: 90,
+      }),
+    ).rejects.toMatchObject({ code: 'capability_unsupported' });
+  });
+
+  it('rejects a non-positive expiry', async () => {
+    const { driver } = presigningDriver();
+    await expect(
+      createSingleGetPlan(driver, { object: { storageId: 'cloud', key: 'a.bin' }, expiresInSeconds: 0 }),
+    ).rejects.toMatchObject({ code: 'config_invalid' });
   });
 });

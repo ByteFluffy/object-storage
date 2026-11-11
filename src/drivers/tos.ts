@@ -10,6 +10,8 @@ import type {
   ObjectRef,
   ObjectStat,
   PresignPartInput,
+  DirectReadPlan,
+  PresignGetInput,
   PresignPutInput,
   StorageDriver,
 } from '../core/contracts.js';
@@ -165,6 +167,9 @@ export function createTosDriver(options: {
     async presignPut(input: PresignPutInput): Promise<DirectUploadPlan> {
       return signPut(client, bucket, input.object.key, input.expiresInSeconds, input.contentType);
     },
+    async presignGet(input: PresignGetInput): Promise<DirectReadPlan> {
+      return signGet(client, bucket, input.object.key, input.expiresInSeconds);
+    },
     async createMultipart(input: CreateMultipartInput) {
       assertPartRequest(input.partSize, input.totalBytes);
       try {
@@ -216,6 +221,20 @@ export function createTosDriver(options: {
       }
     },
   };
+}
+
+function signGet(
+  client: TosObjectClient,
+  bucket: string,
+  key: string,
+  expiresInSeconds: number,
+): DirectReadPlan {
+  try {
+    const url = client.getPreSignedUrl({ bucket, key, method: 'GET', expires: expiresInSeconds });
+    return { method: 'GET', url, headers: {} };
+  } catch (error) {
+    throw mapTosError(error);
+  }
 }
 
 function signPut(

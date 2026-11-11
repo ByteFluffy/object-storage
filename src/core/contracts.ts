@@ -78,6 +78,7 @@ export interface StorageDriver {
   copy(input: DriverCopy): Promise<void>;
   delete(ref: ObjectRef): Promise<void>;
   presignPut?(input: PresignPutInput): Promise<DirectUploadPlan>;
+  presignGet?(input: PresignGetInput): Promise<DirectReadPlan>;
   createMultipart?(input: CreateMultipartInput): Promise<MultipartSession>;
   presignPart?(input: PresignPartInput): Promise<DirectUploadPlan>;
   completeMultipart?(input: CompleteMultipartInput): Promise<{ etag: string | null }>;
@@ -93,6 +94,17 @@ export type DirectUploadPlan = Readonly<{
 export type PresignPutInput = Readonly<{
   object: ObjectRef;
   contentType?: string;
+  expiresInSeconds: number;
+}>;
+
+export type DirectReadPlan = Readonly<{
+  method: 'GET';
+  url: string;
+  headers: Readonly<Record<string, string>>;
+}>;
+
+export type PresignGetInput = Readonly<{
+  object: ObjectRef;
   expiresInSeconds: number;
 }>;
 

@@ -212,6 +212,22 @@ describe('TOS driver', () => {
       method: 'PUT',
       expires: 90,
     });
+
+    const readPlan = await driver.presignGet?.({
+      object: ref('incoming/abc.txt'),
+      expiresInSeconds: 90,
+    });
+    expect(readPlan).toEqual({
+      method: 'GET',
+      url: 'https://signed.example/incoming/abc.txt?method=GET&expires=90',
+      headers: {},
+    });
+    expect(signed[1]).toMatchObject({
+      bucket: 'media',
+      key: 'incoming/abc.txt',
+      method: 'GET',
+      expires: 90,
+    });
   });
 
   it('signs a multipart part with uploadId and partNumber query fields', async () => {

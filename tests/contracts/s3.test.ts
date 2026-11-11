@@ -168,20 +168,36 @@ describe('S3 driver', () => {
     expect((signed[0]?.command as PutObjectCommand).input.IfNoneMatch).toBeUndefined();
     expect(signed[0]?.options).toEqual({ expiresIn: 90 });
 
+    const readPlan = await driver.presignGet?.({
+      object: ref('incoming/abc.txt'),
+      expiresInSeconds: 45,
+    });
+    expect(readPlan).toEqual({
+      method: 'GET',
+      url: 'https://signed.example/incoming/abc.txt?expires=45',
+      headers: {},
+    });
+    expect(signed[1]?.command).toBeInstanceOf(GetObjectCommand);
+    expect((signed[1]?.command as GetObjectCommand).input).toMatchObject({
+      Bucket: 'media',
+      Key: 'incoming/abc.txt',
+    });
+    expect(signed[1]?.options).toEqual({ expiresIn: 45 });
+
     await driver.presignPart?.({
       object: ref('incoming/abc.txt'),
       uploadId: 'up-1',
       partNumber: 2,
       expiresInSeconds: 30,
     });
-    expect(signed[1]?.command).toBeInstanceOf(UploadPartCommand);
-    expect((signed[1]?.command as UploadPartCommand).input).toMatchObject({
+    expect(signed[2]?.command).toBeInstanceOf(UploadPartCommand);
+    expect((signed[2]?.command as UploadPartCommand).input).toMatchObject({
       Bucket: 'media',
       Key: 'incoming/abc.txt',
       UploadId: 'up-1',
       PartNumber: 2,
     });
-    expect(signed[1]?.options).toEqual({ expiresIn: 30 });
+    expect(signed[2]?.options).toEqual({ expiresIn: 30 });
   });
 
   it('does not invent a multipart part size', async () => {

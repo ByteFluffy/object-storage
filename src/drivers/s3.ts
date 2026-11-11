@@ -16,11 +16,13 @@ import type {
   AbortMultipartInput,
   CompleteMultipartInput,
   CreateMultipartInput,
+  DirectReadPlan,
   DirectUploadPlan,
   DriverCopy,
   DriverPut,
   ObjectRef,
   ObjectStat,
+  PresignGetInput,
   PresignPartInput,
   PresignPutInput,
   StorageDriver,
@@ -136,6 +138,11 @@ export function createS3Driver(options: {
         url,
         headers: input.contentType === undefined ? {} : { 'content-type': input.contentType },
       };
+    },
+    async presignGet(input: PresignGetInput): Promise<DirectReadPlan> {
+      const command = new GetObjectCommand({ Bucket: bucket, Key: input.object.key });
+      const url = await presign(client, command, input.expiresInSeconds);
+      return { method: 'GET', url, headers: {} };
     },
     async createMultipart(input: CreateMultipartInput) {
       assertPartRequest(input.partSize, input.totalBytes);
