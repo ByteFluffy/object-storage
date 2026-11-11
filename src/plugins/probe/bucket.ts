@@ -27,11 +27,16 @@ export async function checkBucket(
     }
   }
 
+  if (!driver.capabilities.conditionalWrite.ifNoneMatch) {
+    return { status: 'unavailable', checkedAt, code: 'capability_unsupported' };
+  }
+
   try {
     await driver.put({
       object: ref,
       data: PROBE_BODY,
       checksum: sha256Checksum(PROBE_BODY),
+      precondition: { ifNoneMatch: '*' },
     });
   } catch (error) {
     return resultFromDriverError(error, checkedAt);

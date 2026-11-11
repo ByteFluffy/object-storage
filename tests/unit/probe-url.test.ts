@@ -68,6 +68,7 @@ describe('checkUrl', () => {
     const missing = await checkUrl({
       url: SECRET_URL,
       method: 'HEAD',
+      signatureMethod: 'HEAD',
       fetch: async () => new Response(null, { status: 404 }),
     });
 
@@ -151,6 +152,38 @@ describe('checkUrl', () => {
     });
 
     expect(result.status).not.toBe('passed');
+  });
+
+  it('rejects HEAD without a HEAD signature before fetch', async () => {
+    let calls = 0;
+    await expect(
+      checkUrl({
+        url: SECRET_URL,
+        method: 'HEAD',
+        fetch: async () => {
+          calls += 1;
+          return new Response(null, { status: 200 });
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'config_invalid' });
+    expect(calls).toBe(0);
+  });
+
+  it('does not treat a signed HEAD 200 as verified content', async () => {
+    const result = await checkUrl({
+      url: 'https://cdn.example/note.txt',
+      method: 'HEAD',
+      signatureMethod: 'HEAD',
+      fetch: async () =>
+        new Response(null, {
+          status: 200,
+          headers: { 'content-type': 'text/plain', 'content-length': '3', etag: '"not-a-checksum"' },
+        }),
+    });
+
+    expect(result.status).not.toBe('passed');
+    expect(result.code).toBe('checksum_unavailable');
+    expect(JSON.stringify(result)).not.toContain('not-a-checksum');
   });
 
   it('does not pass expectedChecksum for HEAD', async () => {

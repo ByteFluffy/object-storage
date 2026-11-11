@@ -138,8 +138,16 @@ describe('checkBucket', () => {
     const result = await checkBucket(
       driver({
         storageId: 'local',
+        capabilities: {
+          put: true,
+          copy: false,
+          conditionalWrite: { ifNoneMatch: true },
+          checksums: ['sha256'],
+          presignMethods: [],
+          multipart: null,
+        },
         async put(input) {
-          calls.push(`put:${input.object.key}`);
+          calls.push(`put:${input.object.key}:${input.precondition?.ifNoneMatch ?? ''}`);
           throw new StorageError('forbidden', 'put denied');
         },
         async delete(ref) {
@@ -151,7 +159,29 @@ describe('checkBucket', () => {
 
     expect(result.status).toBe('forbidden');
     expect(result.status).not.toBe('not_found');
+    expect(calls).toEqual(['put:caller/probe-key-9f3a:*']);
+  });
+
+  it('does not overwrite or delete an existing object when the probe key is taken', async () => {
+    const inner = createMemoryDriver({ storageId: 'local' });
+    const existing = new TextEncoder().encode('keep');
+    await inner.put({
+      object: { storageId: 'local', key: 'caller/probe-key-9f3a' },
+      data: existing,
+      checksum: sha256Checksum(existing),
+    });
+    const calls: string[] = [];
+
+    const result = await checkBucket(record(inner, calls), {
+      probeKey: 'caller/probe-key-9f3a',
+      mode: 'write',
+    });
+
+    expect(result.status).not.toBe('passed');
+    expect(result.code).toBe('conflict');
     expect(calls).toEqual(['put:caller/probe-key-9f3a']);
+    const stored = await inner.read({ storageId: 'local', key: 'caller/probe-key-9f3a' });
+    expect(new TextDecoder().decode(stored.data)).toBe('keep');
   });
 });
 
@@ -255,6 +285,67 @@ describe('checkObject', () => {
     expect(result.status).not.toBe('passed');
     expect(result.status === 'mismatch' || result.code === 'checksum_unavailable').toBe(true);
     expect(JSON.stringify(result)).not.toContain('etag-not-checksum');
+  });
+
+  it('does not pass when the object exists without an expected checksum', async () => {
+    const result = await checkObject(
+      driver({
+        storageId: 'local',
+        async stat() {
+          return { byteLength: 3, checksum: { algorithm: 'sha256', value: 'abc' }, etag: 'etag' };
+        },
+      }),
+      { ref },
+    );
+
+    expect(result.status).not.toBe('passed');
+    expect(result.code).toBe('checksum_unavailable');
+  });
+
+  it('does not call a checksum mismatch when only the algorithm differs', async () => {
+    let reads = 0;
+    const result = await checkObject(
+      driver({
+        storageId: 'local',
+        async stat() {
+          return {
+            byteLength: 3,
+            checksum: { algorithm: 'crc64-ecma', value: CRC64 },
+            etag: 'etag-not-checksum',
+          };
+        },
+        async read() {
+          reads += 1;
+          throw new Error('read should wait for a byte budget');
+        },
+      }),
+      { ref, expectedChecksum: { algorithm: 'sha256', value: 'abc' } },
+    );
+
+    expect(reads).toBe(0);
+    expect(result.status).not.toBe('passed');
+    expect(result.code).toBe('checksum_unavailable');
+    expect(result.code).not.toBe('checksum_mismatch');
+  });
+
+  it('reads and compares sha256 when the caller allows the byte budget', async () => {
+    const data = new TextEncoder().encode('abc');
+    const checksum = sha256Checksum(data);
+    const result = await checkObject(
+      driver({
+        storageId: 'local',
+        async stat() {
+          return { byteLength: data.byteLength, checksum: { algorithm: 'crc64-ecma', value: CRC64 }, etag: null };
+        },
+        async read() {
+          return { data, checksum: { algorithm: 'crc64-ecma', value: CRC64 } };
+        },
+      }),
+      { ref, expectedChecksum: checksum, maxReadBytes: data.byteLength },
+    );
+
+    expect(result.status).toBe('passed');
+    expect(result.checksum).toEqual(checksum);
   });
 
   it('keeps a forbidden stat error as forbidden', async () => {

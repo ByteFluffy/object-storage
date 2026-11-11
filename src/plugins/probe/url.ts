@@ -22,9 +22,9 @@ export async function checkUrl(
     now?: () => number;
   }>,
 ): Promise<ProbeResult> {
-  // A presigned GET URL is method-bound, so HEAD would not be the signed request.
-  if (input.signatureMethod === 'GET' && input.method === 'HEAD') {
-    throw new StorageError('config_invalid', safeMessage('HEAD probe cannot use a GET signature', input.url));
+  // A presigned URL is method-bound. HEAD is allowed only with a HEAD signature.
+  if (input.method === 'HEAD' && input.signatureMethod !== 'HEAD') {
+    throw new StorageError('config_invalid', safeMessage('HEAD probe requires a HEAD signature', input.url));
   }
   if (input.signal?.aborted) {
     throw new StorageError('cancelled', safeMessage('operation cancelled', input.url));
@@ -57,20 +57,13 @@ export async function checkUrl(
   }
 
   if (input.method === 'HEAD') {
-    if (input.expectedChecksum) {
-      return {
-        status: 'mismatch',
-        checkedAt,
-        ...(mediaType === undefined ? {} : { mediaType }),
-        code: 'checksum_unavailable',
-      };
-    }
     const byteLength = contentLength(response.headers.get('content-length'));
     return {
-      status: 'passed',
+      status: 'mismatch',
       checkedAt,
       ...(byteLength === undefined ? {} : { byteLength }),
       ...(mediaType === undefined ? {} : { mediaType }),
+      code: 'checksum_unavailable',
     };
   }
 
