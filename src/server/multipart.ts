@@ -3,9 +3,12 @@ import type {
   CompleteMultipartInput,
   CreateMultipartInput,
   MultipartSession,
+  PresignAbortMultipartInput,
+  DirectAbortPlan,
   StorageDriver,
 } from '../core/contracts.js';
 import { StorageError } from '../core/errors.js';
+import { assertExpires } from './direct-upload.js';
 
 export type CompleteMultipartPlanInput = CompleteMultipartInput & Readonly<{
   partCount: number;
@@ -53,6 +56,15 @@ export async function abortMultipartPlan(driver: StorageDriver, input: AbortMult
     throw new StorageError('capability_unsupported', 'multipart abort is not available');
   }
   await driver.abortMultipart(input);
+}
+
+export async function createMultipartAbortPlan(driver: StorageDriver, input: PresignAbortMultipartInput): Promise<DirectAbortPlan> {
+  assertExpires(input.expiresInSeconds);
+  if (!input.uploadId) throw new StorageError('config_invalid', 'multipart upload id is missing');
+  if (typeof driver.presignAbortMultipart !== 'function') {
+    throw new StorageError('capability_unsupported', 'multipart abort presign is not available');
+  }
+  return driver.presignAbortMultipart(input);
 }
 
 function assertPartRequest(partSize: number, totalBytes: number): void {

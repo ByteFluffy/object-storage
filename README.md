@@ -2,7 +2,7 @@
 
 三个应用共用的对象存储包。上传、处理、探测和交付判断是四件独立的事：处理成功不表示已经上传，上传成功不表示链接已验证，判断够用也不表示已经处理。
 
-当前版本 `0.1.2`，个人 npm scope 为 `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
+当前版本 `0.1.3`，个人 npm scope 为 `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
 
 ## 架构
 
@@ -194,6 +194,57 @@ methods. That adapter checks cancellation before calls and preserves a late
 creation receipt for cleanup, but cannot promise physical interruption or a
 ten-second hard deadline for an in-flight native TOS request. Applications that
 need these guarantees can use their TOS service's S3-compatible endpoint.
+
+### Server object operations
+
+The S3 factory owns SDK construction and client disposal. It accepts explicit
+storage configuration; applications resolve their deployment and market before
+calling the package.
+
+```ts
+import { createS3Storage } from '@byte_fluffy/object-storage/drivers/s3';
+import { createSingleGetPlan, createMultipartAbortPlan } from '@byte_fluffy/object-storage/server';
+
+const objects = createS3Storage({
+  storageId: 'media',
+  endpoint: storageEndpoint,
+  bucket: storageBucket,
+  region: storageRegion,
+  credentials: { accessKeyId, secretAccessKey },
+});
+try {
+  const ref = { storageId: 'media', key: 'video/generated.mp4' };
+  const metadata = await objects.storage.stat(ref, { signal });
+  const source = await objects.storage.openRead(ref, { signal, maxBytes: 512 * 1024 * 1024 });
+  try {
+    await consumeStream(source.body);
+  } finally {
+    await source.body.cancel().catch(() => {});
+  }
+  const download = await createSingleGetPlan(objects.driver, { object: ref, expiresInSeconds: 60 });
+  await objects.storage.delete(ref, { signal });
+} finally {
+  objects.close();
+}
+```
+
+`openRead` returns a managed stream without collecting the object in memory.
+It enforces declared length, an optional maximum byte count and cancellation
+through one shared reader. `read` consumes that same stream, buffers the result
+and calculates SHA-256; choose it only when the caller needs all bytes. Both
+return content type when provided by storage. HEAD returns `null` only for a
+missing object; permission and transport failures remain errors.
+
+`createMultipartAbortPlan` produces a signed DELETE plan for an existing upload
+ID. It is supported by the S3 driver. Native TOS SDK 2.9.1 only supports GET/PUT
+presigning through its public API; unsupported abort signing fails explicitly.
+The native TOS adapter can destroy a response stream after headers arrive, but
+cannot physically interrupt a request that is still waiting for headers.
+
+Optional S3 `writeDefaults: { acl, cacheControl }` preserves caller-selected
+object access and caching on server uploads, direct PUT plans and multipart creation. Values are never
+inferred from the deployment market. `close` releases the client's resources
+exactly once.
 
 ### Public URL availability
 

@@ -3,12 +3,15 @@ import type {
   FinalizeRequest,
   ObjectRef,
   ObjectStat,
+  ObjectOperationOptions,
+  OpenReadResult,
+  ReadOptions,
   StorageDriver,
   UploadRequest,
   UploadResult,
 } from './contracts.js';
 import { StorageError } from './errors.js';
-import { sha256Checksum } from '../io/hash.js';
+import { readBytes } from '../io/read.js';
 import { uploadToDriver } from './upload.js';
 
 export class Storage {
@@ -38,14 +41,15 @@ export class Storage {
     }
 
     const tempRef = { storageId: request.storageId, key: request.tempKey };
-    const temp = await driver.stat(tempRef);
+    const options = request.signal === undefined ? undefined : { signal: request.signal };
+    const temp = await driver.stat(tempRef, options);
     if (!temp) throw new StorageError('not_found', 'temp object not found');
-    await sha256Of(driver, tempRef, temp, request.expectedChecksum.value, request.maxReadBytes);
+    await sha256Of(this, tempRef, temp, request.expectedChecksum.value, request.maxReadBytes, request.signal);
 
     const finalRef = { storageId: request.storageId, key: request.finalKey };
-    const existing = await driver.stat(finalRef);
+    const existing = await driver.stat(finalRef, options);
     if (existing) {
-      return reuseOrReject(driver, finalRef, existing, request.expectedChecksum.value, request.maxReadBytes);
+      return reuseOrReject(this, finalRef, existing, request.expectedChecksum.value, request.maxReadBytes, request.signal);
     }
 
     try {
@@ -57,29 +61,42 @@ export class Storage {
       });
     } catch (error) {
       if (error instanceof StorageError && error.code === 'conflict') {
-        const raced = await driver.stat(finalRef);
+        const raced = await driver.stat(finalRef, options);
         if (raced) {
-          return reuseOrReject(driver, finalRef, raced, request.expectedChecksum.value, request.maxReadBytes);
+          return reuseOrReject(this, finalRef, raced, request.expectedChecksum.value, request.maxReadBytes, request.signal);
         }
       }
       throw error;
     }
 
-    const sealed = await driver.stat(finalRef);
+    const sealed = await driver.stat(finalRef, options);
     if (!sealed) throw new StorageError('not_found', 'sealed object not found');
-    const sealedChecksum = await sha256Of(driver, finalRef, sealed, request.expectedChecksum.value, request.maxReadBytes);
+    const sealedChecksum = await sha256Of(this, finalRef, sealed, request.expectedChecksum.value, request.maxReadBytes, request.signal);
     return resultOf(request.storageId, finalRef.key, sealed.byteLength, sealedChecksum, sealed.etag, false);
   }
 
-  async stat(ref: ObjectRef): Promise<ObjectStat | null> {
+  async stat(ref: ObjectRef, options?: ObjectOperationOptions): Promise<ObjectStat | null> {
     assertKey(ref.key);
-    return this.requireDriver(ref.storageId).stat(ref);
+    throwIfAborted(options?.signal);
+    return this.requireDriver(ref.storageId).stat(ref, options);
   }
 
-  async read(ref: ObjectRef): Promise<{ data: Uint8Array; byteLength: number; checksum: Checksum | null }> {
+  async openRead(ref: ObjectRef, options?: ReadOptions): Promise<OpenReadResult> {
     assertKey(ref.key);
-    const loaded = await this.requireDriver(ref.storageId).read(ref);
-    return { data: loaded.data, byteLength: loaded.data.byteLength, checksum: loaded.checksum };
+    throwIfAborted(options?.signal);
+    const driver = this.requireDriver(ref.storageId);
+    if (!driver.openRead) throw new StorageError('capability_unsupported', 'streaming read is not available');
+    return driver.openRead(ref, options);
+  }
+
+  async read(ref: ObjectRef, options?: ReadOptions): Promise<{ data: Uint8Array; byteLength: number; checksum: Checksum; contentType?: string }> {
+    return readBytes(await this.openRead(ref, options));
+  }
+
+  async delete(ref: ObjectRef, options?: ObjectOperationOptions): Promise<void> {
+    assertKey(ref.key);
+    throwIfAborted(options?.signal);
+    await this.requireDriver(ref.storageId).delete(ref, options);
   }
 
   private requireDriver(storageId: string): StorageDriver {
@@ -101,22 +118,24 @@ export function createStorage(input: Readonly<{ drivers: readonly StorageDriver[
 }
 
 async function reuseOrReject(
-  driver: StorageDriver,
+  storage: Storage,
   ref: ObjectRef,
   existing: ObjectStat,
   expected: string,
   maxReadBytes: number | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<UploadResult> {
-  const checksum = await sha256Of(driver, ref, existing, expected, maxReadBytes);
+  const checksum = await sha256Of(storage, ref, existing, expected, maxReadBytes, signal);
   return resultOf(ref.storageId, ref.key, existing.byteLength, checksum, existing.etag, true);
 }
 
 async function sha256Of(
-  driver: StorageDriver,
+  storage: Storage,
   ref: ObjectRef,
   stat: ObjectStat,
   expected: string,
   maxReadBytes: number | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<Checksum> {
   if (stat.checksum?.algorithm === 'sha256') {
     if (stat.checksum.value !== expected) {
@@ -127,8 +146,7 @@ async function sha256Of(
   if (maxReadBytes === undefined || stat.byteLength > maxReadBytes) {
     throw new StorageError('checksum_mismatch', 'object has no sha256 checksum');
   }
-  const loaded = await driver.read(ref);
-  const actual = sha256Checksum(loaded.data);
+  const actual = (await storage.read(ref, { maxBytes: maxReadBytes, ...(signal === undefined ? {} : { signal }) })).checksum;
   if (actual.value !== expected) throw new StorageError('checksum_mismatch', 'object checksum does not match');
   return actual;
 }

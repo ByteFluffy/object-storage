@@ -4,10 +4,13 @@ import type {
   DriverPut,
   ObjectRef,
   ObjectStat,
+  ObjectOperationOptions,
+  ReadOptions,
   StorageDriver,
 } from '../core/contracts.js';
 import { StorageError } from '../core/errors.js';
 import { sha256Checksum } from '../io/hash.js';
+import { openBoundedRead, readBytes } from '../io/read.js';
 
 type StoredObject = Readonly<{
   data: Uint8Array;
@@ -18,6 +21,14 @@ type StoredObject = Readonly<{
 
 export function createMemoryDriver(options: Readonly<{ storageId: string }>): StorageDriver {
   const objects = new Map<string, StoredObject>();
+  const openRead = async (ref: ObjectRef, options?: ReadOptions) => {
+    throwIfAborted(options);
+    const stored = requireObject(objects, ref.key);
+    return openBoundedRead({ body: new ReadableStream<Uint8Array>({ pull(controller) {
+      controller.enqueue(stored.data.slice()); controller.close();
+    } }, { highWaterMark: 0 }), byteLength: stored.data.byteLength,
+    ...(stored.contentType === undefined ? {} : { contentType: stored.contentType }) }, options);
+  };
 
   return {
     storageId: options.storageId,
@@ -41,14 +52,15 @@ export function createMemoryDriver(options: Readonly<{ storageId: string }>): St
       objects.set(input.object.key, stored);
       return { etag: stored.etag, checksum };
     },
-    async stat(ref: ObjectRef): Promise<ObjectStat | null> {
+    async stat(ref: ObjectRef, options?: ObjectOperationOptions): Promise<ObjectStat | null> {
+      throwIfAborted(options);
       const stored = objects.get(ref.key);
       if (!stored) return null;
       return toStat(stored);
     },
-    async read(ref: ObjectRef) {
-      const stored = requireObject(objects, ref.key);
-      return { data: stored.data.slice(), checksum: stored.checksum };
+    openRead,
+    async read(ref: ObjectRef, options?: ReadOptions) {
+      return readBytes(await openRead(ref, options));
     },
     async copy(input: DriverCopy) {
       const source = requireObject(objects, input.from.key);
@@ -58,10 +70,15 @@ export function createMemoryDriver(options: Readonly<{ storageId: string }>): St
         data: source.data.slice(),
       });
     },
-    async delete(ref: ObjectRef) {
+    async delete(ref: ObjectRef, options?: ObjectOperationOptions) {
+      throwIfAborted(options);
       objects.delete(ref.key);
     },
   };
+}
+
+function throwIfAborted(options: ObjectOperationOptions | undefined): void {
+  if (options?.signal?.aborted) throw new StorageError('cancelled', 'operation cancelled');
 }
 
 function toStat(stored: StoredObject): ObjectStat {

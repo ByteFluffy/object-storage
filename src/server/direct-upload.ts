@@ -45,7 +45,7 @@ export async function createSingleGetPlan(
   });
 }
 
-function assertExpires(expiresInSeconds: number): void {
+export function assertExpires(expiresInSeconds: number): void {
   if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 1) {
     throw new StorageError('config_invalid', 'expiresInSeconds must be a positive integer');
   }

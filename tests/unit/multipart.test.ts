@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createMemoryDriver } from '../../src/drivers/memory.js';
-import { abortMultipartPlan, completeMultipartPlan, createMultipartPlan } from '../../src/server/multipart.js';
+import { abortMultipartPlan, completeMultipartPlan, createMultipartPlan, createMultipartAbortPlan } from '../../src/server/index.js';
 import type { CreateMultipartInput, StorageDriver } from '../../src/core/contracts.js';
 
 function multipartDriver(): {
@@ -55,6 +55,31 @@ function multipartDriver(): {
 const object = { storageId: 'cloud', key: 'blob.bin' };
 
 describe('multipart plans', () => {
+  it('signs a DELETE cleanup plan for the original multipart identity without aborting it', async () => {
+    const { driver, aborted } = multipartDriver();
+    const signed: unknown[] = [];
+    driver.presignAbortMultipart = async input => {
+      signed.push(input); return { method: 'DELETE', url: 'https://signed.example/object?uploadId=up-1', headers: {} };
+    };
+    const input = { object, uploadId: 'up-1', expiresInSeconds: 60 };
+    await expect(createMultipartAbortPlan(driver, input)).resolves.toEqual({ method: 'DELETE', url: 'https://signed.example/object?uploadId=up-1', headers: {} });
+    expect(signed).toEqual([input]); expect(aborted).toEqual([]);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects cleanup expiry %s before signing', async expiresInSeconds => {
+    const { driver } = multipartDriver();
+    let signed = false;
+    driver.presignAbortMultipart = async () => { signed = true; return { method: 'DELETE', url: 'https://signed.example', headers: {} }; };
+    await expect(createMultipartAbortPlan(driver, { object, uploadId: 'up-1', expiresInSeconds })).rejects.toMatchObject({ code: 'config_invalid' });
+    expect(signed).toBe(false);
+  });
+
+  it('rejects an absent upload identity or unsupported cleanup signing without a provider call', async () => {
+    const { driver } = multipartDriver();
+    await expect(createMultipartAbortPlan(driver, { object, uploadId: '', expiresInSeconds: 60 })).rejects.toMatchObject({ code: 'config_invalid' });
+    await expect(createMultipartAbortPlan(driver, { object, uploadId: 'up-1', expiresInSeconds: 60 })).rejects.toMatchObject({ code: 'capability_unsupported' });
+  });
+
   it('preserves cancellation and conditional completion through the plan facade', async () => {
     const { driver, created, completed, aborted } = multipartDriver();
     const signal = new AbortController().signal;

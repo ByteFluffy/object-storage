@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
+import { Readable } from 'node:stream';
 import { sha256Checksum } from '../../src/io/hash.js';
 import { createTosClient, createTosDriver, type TosObjectClient } from '../../src/drivers/tos.js';
 import type { ObjectRef } from '../../src/core/contracts.js';
@@ -52,10 +53,10 @@ function clientOf(overrides: Partial<TosObjectClient> = {}): {
         requestId: 'req-head',
       };
     },
-    async getObject() {
+    async getObjectV2() {
       return {
-        data: Buffer.from('abc'),
-        headers: { etag: '"remote-etag"', 'x-tos-hash-crc64ecma': CRC64 },
+        data: { content: Readable.from([Buffer.from('abc')]) },
+        headers: { etag: '"remote-etag"', 'x-tos-hash-crc64ecma': CRC64, 'content-length': '3', 'content-type': 'text/plain' },
         statusCode: 200,
         requestId: 'req-get',
       };
@@ -93,6 +94,43 @@ function clientOf(overrides: Partial<TosObjectClient> = {}): {
 }
 
 describe('TOS driver', () => {
+  it('opens the SDK getObjectV2 stream and bounds reads without the deprecated buffered getObject', async () => {
+    const calls: unknown[] = [];
+    const { client } = clientOf({ getObjectV2: async input => {
+      calls.push(input);
+      return { data: { content: Readable.from([Buffer.from('abc')]) }, headers: { 'content-length': '3', 'content-type': 'text/plain' } };
+    } });
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    const read = await driver.read(ref('stream.txt'), { maxBytes: 3 });
+    expect(read).toMatchObject({ data: new Uint8Array(Buffer.from('abc')), checksum: sha256Checksum(Buffer.from('abc')), contentType: 'text/plain' });
+    expect(calls).toEqual([{ bucket: 'media', key: 'stream.txt', dataType: 'stream' }]);
+    await expect(driver.read(ref('stream.txt'), { maxBytes: 2 })).rejects.toMatchObject({ code: 'input_too_large' });
+    expect(driver.presignAbortMultipart).toBeUndefined();
+  });
+
+  it('cancels the owned native stream after headers even though request admission has no SDK AbortSignal', async () => {
+    const controller = new AbortController();
+    const raw = new Readable({ read() {} });
+    const destroyed = new Promise<void>(resolve => raw.once('close', resolve));
+    const { client } = clientOf({ getObjectV2: async () => ({ data: { content: raw }, headers: { 'content-length': '10' } }) });
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    const opened = await driver.openRead!(ref('stall.bin'), { signal: controller.signal });
+    const reader = opened.body.getReader(); const reading = reader.read(); controller.abort();
+    await expect(reading).rejects.toMatchObject({ code: 'cancelled' });
+    await destroyed; expect(raw.destroyed).toBe(true); reader.releaseLock();
+  });
+
+  it('rejects cancelled native object operations before admission', async () => {
+    let calls = 0;
+    const { client } = clientOf({ getObjectV2: async () => { calls++; throw new Error('must not read'); },
+      headObject: async () => { calls++; throw new Error('must not stat'); }, deleteObject: async () => { calls++; throw new Error('must not delete'); } });
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    const options = { signal: AbortSignal.abort() };
+    await expect(driver.read(ref('a'), options)).rejects.toMatchObject({ code: 'cancelled' });
+    await expect(driver.stat(ref('a'), options)).rejects.toMatchObject({ code: 'cancelled' });
+    await expect(driver.delete(ref('a'), options)).rejects.toMatchObject({ code: 'cancelled' }); expect(calls).toBe(0);
+  });
+
   it('serializes native multipart and forbidOverwrite through the installed SDK request adapter without network I/O', async () => {
     const wire: { method?: string; data?: unknown; headers?: unknown }[] = [];
     const sdk = createTosClient({ region: 'cn-beijing', endpoint: 'tos.example', accessKeyId: 'fixture', accessKeySecret: 'fixture', maxRetryCount: 0 });
@@ -414,7 +452,7 @@ describe('TOS driver', () => {
         headObject: async () => {
           throw { statusCode: 404, message: SECRET_MESSAGE, requestId: 'req-missing' };
         },
-        getObject: async () => {
+        getObjectV2: async () => {
           throw { statusCode: 404, message: SECRET_MESSAGE };
         },
       }).client,

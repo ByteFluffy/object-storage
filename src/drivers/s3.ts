@@ -10,6 +10,7 @@ import {
   S3Client,
   UploadPartCommand,
   type S3ClientConfig,
+  type ObjectCannedACL,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type {
@@ -18,18 +19,25 @@ import type {
   CreateMultipartInput,
   DirectReadPlan,
   DirectUploadPlan,
+  DirectAbortPlan,
   DriverCopy,
   DriverPut,
   ObjectRef,
   ObjectStat,
+  ObjectOperationOptions,
+  OpenReadResult,
+  ReadOptions,
   PresignGetInput,
   PresignPartInput,
   PresignPutInput,
+  PresignAbortMultipartInput,
   StorageDriver,
   UploadPartInput,
 } from '../core/contracts.js';
 import { StorageError, type StorageErrorCode } from '../core/errors.js';
+import { createStorage, type Storage } from '../core/storage.js';
 import { sha256Checksum } from '../io/hash.js';
+import { openBoundedRead, readBytes } from '../io/read.js';
 
 const MIN_PART_BYTES = 5 * 1024 * 1024;
 const MAX_PART_BYTES = 5 * 1024 * 1024 * 1024;
@@ -42,8 +50,32 @@ export type S3ObjectClient = {
   presign(command: object, options: { expiresIn: number }): Promise<string>;
 };
 
+export type S3WriteDefaults = Readonly<{ acl?: ObjectCannedACL; cacheControl?: string }>;
+
 export function createS3Client(config: S3ClientConfig): S3Client {
   return new S3Client(config);
+}
+
+export function createS3Storage(options: {
+  storageId: string;
+  bucket: string;
+  endpoint: string;
+  region?: string;
+  credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
+  forcePathStyle?: boolean;
+  writeDefaults?: S3WriteDefaults;
+}): { storage: Storage; driver: StorageDriver; close(): void } {
+  const client = createS3Client({
+    endpoint: options.endpoint, region: options.region ?? 'us-east-1', credentials: options.credentials,
+    forcePathStyle: options.forcePathStyle ?? false,
+    requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
+  });
+  let closed = false;
+  const close = () => { if (!closed) { closed = true; client.destroy(); } };
+  try {
+    const driver = createS3Driver({ storageId: options.storageId, bucket: options.bucket, client: bindS3Client(client), writeDefaults: options.writeDefaults });
+    return { storage: createStorage({ drivers: [driver] }), driver, close };
+  } catch (error) { close(); throw error; }
 }
 
 export function bindS3Client(client: S3Client): S3ObjectClient {
@@ -52,7 +84,11 @@ export function bindS3Client(client: S3Client): S3ObjectClient {
       return client.send(command as S3Command, options);
     },
     presign(command, options) {
-      return getSignedUrl(client, command as SignableCommand, { expiresIn: options.expiresIn });
+      return getSignedUrl(client, command as SignableCommand, {
+        expiresIn: options.expiresIn,
+        signableHeaders: new Set(['cache-control', 'x-amz-acl']),
+        unhoistableHeaders: new Set(['x-amz-acl']),
+      });
     },
   };
 }
@@ -61,8 +97,26 @@ export function createS3Driver(options: {
   storageId: string;
   bucket: string;
   client: S3ObjectClient;
+  writeDefaults?: S3WriteDefaults;
 }): StorageDriver {
   const { storageId, bucket, client } = options;
+  const writeMetadata = {
+    ...(options.writeDefaults?.acl === undefined ? {} : { ACL: options.writeDefaults.acl }),
+    ...(options.writeDefaults?.cacheControl === undefined ? {} : { CacheControl: options.writeDefaults.cacheControl }),
+  };
+  const openRead = async (ref: ObjectRef, readOptions: ReadOptions = {}): Promise<OpenReadResult> => {
+    const output = await send(client, new GetObjectCommand({
+      Bucket: bucket, Key: ref.key, ...(ref.version === undefined ? {} : { VersionId: ref.version }),
+    }), readOptions.signal);
+    if (!isRecord(output) || !isRecord(output.Body) || typeof output.Body.transformToWebStream !== 'function') {
+      throw new StorageError('unavailable', 'object body is missing');
+    }
+    return openBoundedRead({
+      body: output.Body.transformToWebStream(),
+      ...(typeof output.ContentLength === 'number' ? { byteLength: output.ContentLength } : {}),
+      ...(typeof output.ContentType === 'string' ? { contentType: output.ContentType } : {}),
+    }, readOptions);
+  };
 
   return {
     storageId,
@@ -71,42 +125,35 @@ export function createS3Driver(options: {
       copy: true,
       conditionalWrite: { ifNoneMatch: true },
       checksums: ['sha256'],
-      presignMethods: ['GET', 'PUT', 'HEAD'],
+      presignMethods: ['GET', 'PUT', 'HEAD', 'DELETE'],
       multipart: { minPartBytes: MIN_PART_BYTES, maxPartBytes: MAX_PART_BYTES },
     },
     async put(input: DriverPut) {
       const output = await send(client, new PutObjectCommand({
         Bucket: bucket,
         Key: input.object.key,
+        ...writeMetadata,
         Body: input.data,
         ...(input.contentType === undefined ? {} : { ContentType: input.contentType }),
         ...(input.precondition?.ifNoneMatch === '*' ? { IfNoneMatch: '*' } : {}),
       }), input.signal);
       return { etag: etagOf(output), checksum: sha256Checksum(input.data) };
     },
-    async stat(ref: ObjectRef): Promise<ObjectStat | null> {
+    async stat(ref: ObjectRef, operation: ObjectOperationOptions = {}): Promise<ObjectStat | null> {
       try {
         const output = await send(client, new HeadObjectCommand({
           Bucket: bucket,
           Key: ref.key,
           ...(ref.version === undefined ? {} : { VersionId: ref.version }),
-        }));
+        }), operation.signal);
         return statFromHead(output);
       } catch (error) {
         if (error instanceof StorageError && error.code === 'not_found') return null;
         throw error;
       }
     },
-    async read(ref: ObjectRef) {
-      const output = await send(client, new GetObjectCommand({
-        Bucket: bucket,
-        Key: ref.key,
-        ...(ref.version === undefined ? {} : { VersionId: ref.version }),
-      }));
-      if (!isRecord(output)) throw new StorageError('unavailable', 'object body is missing');
-      const data = await bytesOf(output.Body, output.ContentLength);
-      return { data, checksum: sha256Checksum(data) };
-    },
+    openRead,
+    async read(ref: ObjectRef, readOptions?: ReadOptions) { return readBytes(await openRead(ref, readOptions)); },
     async copy(input: DriverCopy) {
       await send(client, new CopyObjectCommand({
         Bucket: bucket,
@@ -115,13 +162,13 @@ export function createS3Driver(options: {
         ...(input.ifNoneMatch === '*' ? { IfNoneMatch: '*' } : {}),
       }), input.signal);
     },
-    async delete(ref: ObjectRef) {
+    async delete(ref: ObjectRef, operation: ObjectOperationOptions = {}) {
       try {
         await send(client, new DeleteObjectCommand({
           Bucket: bucket,
           Key: ref.key,
           ...(ref.version === undefined ? {} : { VersionId: ref.version }),
-        }));
+        }), operation.signal);
       } catch (error) {
         if (error instanceof StorageError && error.code === 'not_found') return;
         throw error;
@@ -131,13 +178,18 @@ export function createS3Driver(options: {
       const command = new PutObjectCommand({
         Bucket: bucket,
         Key: input.object.key,
+        ...writeMetadata,
         ...(input.contentType === undefined ? {} : { ContentType: input.contentType }),
       });
       const url = await presign(client, command, input.expiresInSeconds);
       return {
         method: 'PUT',
         url,
-        headers: input.contentType === undefined ? {} : { 'content-type': input.contentType },
+        headers: {
+          ...(input.contentType === undefined ? {} : { 'content-type': input.contentType }),
+          ...(writeMetadata.ACL === undefined ? {} : { 'x-amz-acl': writeMetadata.ACL }),
+          ...(writeMetadata.CacheControl === undefined ? {} : { 'cache-control': writeMetadata.CacheControl }),
+        },
       };
     },
     async presignGet(input: PresignGetInput): Promise<DirectReadPlan> {
@@ -145,11 +197,17 @@ export function createS3Driver(options: {
       const url = await presign(client, command, input.expiresInSeconds);
       return { method: 'GET', url, headers: {} };
     },
+    async presignAbortMultipart(input: PresignAbortMultipartInput): Promise<DirectAbortPlan> {
+      const command = new AbortMultipartUploadCommand({ Bucket: bucket, Key: input.object.key, UploadId: input.uploadId });
+      const url = await presign(client, command, input.expiresInSeconds);
+      return { method: 'DELETE', url, headers: {} };
+    },
     async createMultipart(input: CreateMultipartInput) {
       assertPartRequest(input.partSize, input.totalBytes);
       const output = await send(client, new CreateMultipartUploadCommand({
         Bucket: bucket,
         Key: input.object.key,
+        ...writeMetadata,
         ...(input.contentType === undefined ? {} : { ContentType: input.contentType }),
       }), input.signal);
       if (!isRecord(output) || typeof output.UploadId !== 'string' || output.UploadId.length === 0) {
@@ -235,18 +293,6 @@ function statFromHead(output: unknown): ObjectStat {
 function etagOf(output: unknown): string | null {
   if (!isRecord(output) || typeof output.ETag !== 'string' || output.ETag.length === 0) return null;
   return output.ETag;
-}
-
-async function bytesOf(body: unknown, contentLength: unknown): Promise<Uint8Array> {
-  if (body instanceof Uint8Array) return new Uint8Array(body);
-  if (isRecord(body) && typeof body.transformToByteArray === 'function') {
-    const bytes = await body.transformToByteArray();
-    if (bytes instanceof Uint8Array) return new Uint8Array(bytes);
-  }
-  if ((body === undefined || body === null) && (contentLength === undefined || contentLength === 0)) {
-    return new Uint8Array();
-  }
-  throw new StorageError('unavailable', 'object body is missing');
 }
 
 function copySource(bucket: string, key: string, version: string | undefined): string {

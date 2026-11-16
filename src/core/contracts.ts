@@ -11,6 +11,16 @@ export type ObjectRef = Readonly<{
   version?: string;
 }>;
 
+export type ObjectOperationOptions = Readonly<{ signal?: AbortSignal }>;
+
+export type ReadOptions = ObjectOperationOptions & Readonly<{ maxBytes?: number }>;
+
+export type OpenReadResult = Readonly<{
+  body: ReadableStream<Uint8Array>;
+  byteLength?: number;
+  contentType?: string;
+}>;
+
 export type DeliveryEvidence =
   | Readonly<{ status: 'not_requested' }>
   | Readonly<{ status: 'preparing'; nextCheckAt: string }>
@@ -47,7 +57,7 @@ export type DriverCapabilities = Readonly<{
   copy: boolean;
   conditionalWrite: Readonly<{ ifNoneMatch: boolean }>;
   checksums: readonly ChecksumAlgorithm[];
-  presignMethods: readonly ('GET' | 'PUT' | 'HEAD')[];
+  presignMethods: readonly ('GET' | 'PUT' | 'HEAD' | 'DELETE')[];
   multipart: Readonly<{ minPartBytes: number; maxPartBytes: number }> | null;
 }>;
 
@@ -73,15 +83,17 @@ export interface StorageDriver {
   readonly storageId: string;
   readonly capabilities: DriverCapabilities;
   put(input: DriverPut): Promise<{ etag: string | null; checksum: Checksum | null }>;
-  stat(ref: ObjectRef): Promise<ObjectStat | null>;
-  read(ref: ObjectRef): Promise<{ data: Uint8Array; checksum: Checksum | null }>;
+  stat(ref: ObjectRef, options?: ObjectOperationOptions): Promise<ObjectStat | null>;
+  openRead?(ref: ObjectRef, options?: ReadOptions): Promise<OpenReadResult>;
+  read(ref: ObjectRef, options?: ReadOptions): Promise<{ data: Uint8Array; checksum: Checksum | null; contentType?: string }>;
   copy(input: DriverCopy): Promise<void>;
-  delete(ref: ObjectRef): Promise<void>;
+  delete(ref: ObjectRef, options?: ObjectOperationOptions): Promise<void>;
   presignPut?(input: PresignPutInput): Promise<DirectUploadPlan>;
   presignGet?(input: PresignGetInput): Promise<DirectReadPlan>;
   createMultipart?(input: CreateMultipartInput): Promise<MultipartSession>;
   uploadPart?(input: UploadPartInput): Promise<{ etag: string }>;
   presignPart?(input: PresignPartInput): Promise<DirectUploadPlan>;
+  presignAbortMultipart?(input: PresignAbortMultipartInput): Promise<DirectAbortPlan>;
   completeMultipart?(input: CompleteMultipartInput): Promise<{ etag: string | null }>;
   abortMultipart?(input: AbortMultipartInput): Promise<void>;
 }
@@ -135,6 +147,18 @@ export type PresignPartInput = Readonly<{
   uploadId: string;
   partNumber: number;
   expiresInSeconds: number;
+}>;
+
+export type PresignAbortMultipartInput = Readonly<{
+  object: ObjectRef;
+  uploadId: string;
+  expiresInSeconds: number;
+}>;
+
+export type DirectAbortPlan = Readonly<{
+  method: 'DELETE';
+  url: string;
+  headers: Readonly<Record<string, string>>;
 }>;
 
 export type CompleteMultipartInput = Readonly<{

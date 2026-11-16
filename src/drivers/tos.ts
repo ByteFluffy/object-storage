@@ -1,4 +1,5 @@
 import { isCancel, TosClient } from '@volcengine/tos-sdk';
+import { Readable } from 'node:stream';
 import type {
   AbortMultipartInput,
   Checksum,
@@ -9,6 +10,9 @@ import type {
   DriverPut,
   ObjectRef,
   ObjectStat,
+  ObjectOperationOptions,
+  OpenReadResult,
+  ReadOptions,
   PresignPartInput,
   DirectReadPlan,
   PresignGetInput,
@@ -18,6 +22,7 @@ import type {
 } from '../core/contracts.js';
 import { StorageError, type StorageErrorCode } from '../core/errors.js';
 import { sha256Checksum } from '../io/hash.js';
+import { openBoundedRead, readBytes } from '../io/read.js';
 
 const CRC64_HEADER = 'x-tos-hash-crc64ecma';
 // uploadFile in @volcengine/tos-sdk@2.9.1 uses 5 MiB as the minimum part except the last one.
@@ -34,8 +39,9 @@ export type TosResult<T> = {
 };
 
 /**
- * Native TOS SDK 2.9.1 multipart methods expose no per-request cancellation.
- * Signals gate admission only; in-flight calls retain their eventual receipts.
+ * Native TOS SDK 2.9.1 requests expose no per-request cancellation.
+ * Signals gate admission; managed response streams support cancellation after headers.
+ * In-flight multipart calls retain their eventual receipts.
  * Use the S3-compatible driver when physical AbortSignal cancellation is required.
  */
 export type TosObjectClient = {
@@ -47,7 +53,7 @@ export type TosObjectClient = {
     forbidOverwrite?: boolean;
   }): Promise<TosResult<unknown>>;
   headObject(input: { bucket?: string; key: string; versionId?: string }): Promise<TosResult<unknown>>;
-  getObject(input: { bucket?: string; key: string; versionId?: string }): Promise<TosResult<Buffer>>;
+  getObjectV2(input: { bucket?: string; key: string; versionId?: string; dataType: 'stream' }): Promise<TosResult<{ content: NodeJS.ReadableStream }>>;
   deleteObject(input: { bucket?: string; key: string; versionId?: string }): Promise<TosResult<unknown>>;
   copyObject(input: {
     bucket?: string;
@@ -97,6 +103,23 @@ export function createTosDriver(options: {
   client: TosObjectClient;
 }): StorageDriver {
   const { storageId, bucket, client } = options;
+  const openRead = async (ref: ObjectRef, readOptions: ReadOptions = {}): Promise<OpenReadResult> => {
+    throwIfAborted(readOptions.signal);
+    try {
+      const response = await client.getObjectV2({
+        bucket, key: ref.key, dataType: 'stream', ...(ref.version === undefined ? {} : { versionId: ref.version }),
+      });
+      if (!(response.data.content instanceof Readable)) throw new StorageError('unavailable', 'object body is missing');
+      const byteLength = textField(response, 'content-length');
+      const contentType = textField(response, 'content-type');
+      // Node and DOM declarations differ on EOF result types for the same WHATWG stream.
+      const body = Readable.toWeb(response.data.content) as unknown as ReadableStream<Uint8Array>;
+      return openBoundedRead({ body,
+        ...(byteLength === null ? {} : { byteLength: Number(byteLength) }),
+        ...(contentType === null ? {} : { contentType }),
+      }, readOptions);
+    } catch (error) { throw mapTosError(error, readOptions.signal); }
+  };
 
   return {
     storageId,
@@ -123,7 +146,8 @@ export function createTosDriver(options: {
         throw mapTosError(error, input.signal);
       }
     },
-    async stat(ref: ObjectRef): Promise<ObjectStat | null> {
+    async stat(ref: ObjectRef, operation: ObjectOperationOptions = {}): Promise<ObjectStat | null> {
+      throwIfAborted(operation.signal);
       try {
         const response = await client.headObject({
           bucket,
@@ -132,24 +156,13 @@ export function createTosDriver(options: {
         });
         return statFromHead(response);
       } catch (error) {
-        const mapped = mapTosError(error);
+        const mapped = mapTosError(error, operation.signal);
         if (mapped.code === 'not_found') return null;
         throw mapped;
       }
     },
-    async read(ref: ObjectRef) {
-      try {
-        const response = await client.getObject({
-          bucket,
-          key: ref.key,
-          ...(ref.version === undefined ? {} : { versionId: ref.version }),
-        });
-        const data = bytesOf(response.data);
-        return { data, checksum: sha256Checksum(data) };
-      } catch (error) {
-        throw mapTosError(error);
-      }
-    },
+    openRead,
+    async read(ref: ObjectRef, readOptions?: ReadOptions) { return readBytes(await openRead(ref, readOptions)); },
     async copy(input: DriverCopy) {
       throwIfAborted(input.signal);
       try {
@@ -165,7 +178,8 @@ export function createTosDriver(options: {
         throw mapTosError(error, input.signal);
       }
     },
-    async delete(ref: ObjectRef) {
+    async delete(ref: ObjectRef, operation: ObjectOperationOptions = {}) {
+      throwIfAborted(operation.signal);
       try {
         await client.deleteObject({
           bucket,
@@ -173,7 +187,7 @@ export function createTosDriver(options: {
           ...(ref.version === undefined ? {} : { versionId: ref.version }),
         });
       } catch (error) {
-        const mapped = mapTosError(error);
+        const mapped = mapTosError(error, operation.signal);
         if (mapped.code === 'not_found') return;
         throw mapped;
       }
@@ -324,11 +338,6 @@ function field(source: unknown, name: string): unknown {
     if (key.toLowerCase() === wanted) return source[key];
   }
   return undefined;
-}
-
-function bytesOf(data: unknown): Uint8Array {
-  if (data instanceof Uint8Array) return new Uint8Array(data);
-  throw new StorageError('unavailable', 'object body is missing');
 }
 
 function byteLengthOf(value: unknown): number {

@@ -69,6 +69,9 @@ describe('Storage.finalize', () => {
       async read(ref: { storageId: string; key: string }) {
         return inner.read(ref);
       },
+      async openRead(ref, options) {
+        return inner.openRead(ref, options);
+      },
       async copy(input: { from: { key: string }; to: { key: string }; ifNoneMatch?: '*' }) {
         const loaded = await inner.read({ storageId: 'local', key: input.from.key });
         await inner.upload({
