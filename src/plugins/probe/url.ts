@@ -14,7 +14,8 @@ export async function checkUrl(
     url: string;
     method: 'GET' | 'HEAD';
     fetch: (url: string, init: ProbeFetchInit) => Promise<Response>;
-    signatureMethod?: 'GET' | 'PUT' | 'HEAD';
+    signatureMethod?: 'GET' | 'PUT' | 'HEAD' | 'unsigned';
+    verification?: 'checksum' | 'availability';
     expectedChecksum?: Checksum;
     expectedMediaType?: string;
     maxBytes?: number;
@@ -22,8 +23,15 @@ export async function checkUrl(
     now?: () => number;
   }>,
 ): Promise<ProbeResult> {
-  // A presigned URL is method-bound. HEAD is allowed only with a HEAD signature.
-  if (input.method === 'HEAD' && input.signatureMethod !== 'HEAD') {
+  const availability = input.verification === 'availability';
+  if (availability && input.expectedChecksum !== undefined) {
+    throw new StorageError('config_invalid', safeMessage('Availability probes cannot verify an expected checksum', input.url));
+  }
+  if (input.signatureMethod === 'unsigned' && input.url.includes('?')) {
+    throw new StorageError('config_invalid', safeMessage('Unsigned probes require a URL without a query string', input.url));
+  }
+  // A presigned URL is method-bound; only explicit unsigned URLs can omit the signature.
+  if (input.method === 'HEAD' && input.signatureMethod !== 'HEAD' && input.signatureMethod !== 'unsigned') {
     throw new StorageError('config_invalid', safeMessage('HEAD probe requires a HEAD signature', input.url));
   }
   if (input.signal?.aborted) {
@@ -38,6 +46,7 @@ export async function checkUrl(
       redirect: 'manual',
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
+    if (availability) await response.body?.cancel();
   } catch (error) {
     const message = error instanceof Error ? error.message : 'url probe failed';
     if (error instanceof StorageError && (error.code === 'cancelled' || error.code === 'config_invalid')) {
@@ -46,36 +55,37 @@ export async function checkUrl(
     throw new StorageError('unavailable', safeMessage(message, input.url));
   }
 
-  if (isRedirect(response.status)) return { status: 'redirected', checkedAt };
-  if (response.status === 403) return { status: 'forbidden', checkedAt, code: 'forbidden' };
-  if (response.status === 404) return { status: 'not_found', checkedAt, code: 'not_found' };
-  if (response.status !== 200) return { status: 'unavailable', checkedAt, code: 'unavailable' };
+  const result = (details: Omit<ProbeResult, 'checkedAt' | 'httpStatus'>): ProbeResult => ({
+    ...details, checkedAt, httpStatus: response.status,
+  });
+  if (isRedirect(response.status)) return result({ status: 'redirected' });
+  if (response.status === 403) return result({ status: 'forbidden', code: 'forbidden' });
+  if (response.status === 404) return result({ status: 'not_found', code: 'not_found' });
+  if (response.status !== 200) return result({ status: 'unavailable', code: 'unavailable' });
 
   const mediaType = mediaTypeEssence(response.headers.get('content-type'));
   if (input.expectedMediaType !== undefined && mediaTypeEssence(input.expectedMediaType) !== mediaType) {
-    return { status: 'mismatch', checkedAt, ...(mediaType === undefined ? {} : { mediaType }) };
+    return result({ status: 'mismatch', ...(mediaType === undefined ? {} : { mediaType }) });
   }
 
-  if (input.method === 'HEAD') {
+  if (input.method === 'HEAD' || availability) {
     const byteLength = contentLength(response.headers.get('content-length'));
-    return {
-      status: 'mismatch',
-      checkedAt,
+    return result({
+      status: availability ? 'passed' : 'mismatch',
       ...(byteLength === undefined ? {} : { byteLength }),
       ...(mediaType === undefined ? {} : { mediaType }),
-      code: 'checksum_unavailable',
-    };
+      ...(availability ? {} : { code: 'checksum_unavailable' }),
+    });
   }
 
   const data = new Uint8Array(await response.arrayBuffer());
   if (input.maxBytes !== undefined && data.byteLength > input.maxBytes) {
-    return {
+    return result({
       status: 'mismatch',
-      checkedAt,
       byteLength: data.byteLength,
       ...(mediaType === undefined ? {} : { mediaType }),
       code: 'input_too_large',
-    };
+    });
   }
 
   const checksum = sha256Checksum(data);
@@ -83,23 +93,21 @@ export async function checkUrl(
     input.expectedChecksum !== undefined &&
     (checksum.algorithm !== input.expectedChecksum.algorithm || checksum.value !== input.expectedChecksum.value)
   ) {
-    return {
+    return result({
       status: 'mismatch',
-      checkedAt,
       byteLength: data.byteLength,
       checksum,
       ...(mediaType === undefined ? {} : { mediaType }),
       code: 'checksum_mismatch',
-    };
+    });
   }
 
-  return {
+  return result({
     status: 'passed',
-    checkedAt,
     byteLength: data.byteLength,
     checksum,
     ...(mediaType === undefined ? {} : { mediaType }),
-  };
+  });
 }
 
 function isRedirect(status: number): boolean {

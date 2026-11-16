@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { StorageError } from '../../src/core/errors.js';
 import { sha256Checksum } from '../../src/io/hash.js';
 import { checkUrl } from '../../src/plugins/probe/index.js';
@@ -6,6 +6,161 @@ import { checkUrl } from '../../src/plugins/probe/index.js';
 const SECRET_URL = 'https://cdn.example/object.bin?X-Amz-Signature=secret-value&X-Amz-Credential=hidden';
 
 describe('checkUrl', () => {
+  it('passes an explicit unsigned HEAD availability check without claiming a checksum', async () => {
+    const response = new Response(null, { status: 200, headers: {
+      'content-type': 'image/png; charset=binary', 'content-length': '123', etag: '"not-a-checksum"',
+    } });
+    const readBody = vi.spyOn(response, 'arrayBuffer');
+    const fetch = vi.fn(async () => response);
+    const result = await checkUrl({
+      url: 'https://cdn.example/image.png', method: 'HEAD', signatureMethod: 'unsigned',
+      verification: 'availability', expectedMediaType: 'image/png', fetch,
+      now: () => Date.parse('2024-01-02T03:04:05.000Z'),
+    });
+
+    expect(result).toEqual({ status: 'passed', httpStatus: 200, checkedAt: '2024-01-02T03:04:05.000Z', byteLength: 123, mediaType: 'image/png' });
+    expect(result.checksum).toBeUndefined();
+    expect(readBody).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('https://cdn.example/image.png', { method: 'HEAD', redirect: 'manual' });
+  });
+
+  it('allows an actual HEAD signature for availability without exposing its query', async () => {
+    const result = await checkUrl({
+      url: SECRET_URL, method: 'HEAD', signatureMethod: 'HEAD', verification: 'availability',
+      fetch: async () => new Response(null, { status: 200 }),
+    });
+    expect(result.status).toBe('passed');
+    expect(result.checksum).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('secret-value');
+  });
+
+  it.each([
+    { status: 200, expected: 'passed' }, { status: 403, expected: 'forbidden' },
+    { status: 404, expected: 'not_found' }, { status: 302, expected: 'redirected' },
+    { status: 500, expected: 'unavailable' },
+  ])('releases unread GET availability bodies for HTTP $status without claiming verified content', async ({ status, expected }) => {
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1])); controller.close(); }, cancel,
+    }), { status });
+    const readBody = vi.spyOn(response, 'arrayBuffer');
+    const result = await checkUrl({
+      url: 'https://cdn.example/note.txt', method: 'GET', signatureMethod: 'unsigned',
+      verification: 'availability', fetch: async () => response,
+    });
+    expect(result.status).toBe(expected);
+    expect(result.httpStatus).toBe(status);
+    expect(result.checksum).toBeUndefined();
+    expect(result.byteLength).toBeUndefined();
+    expect(readBody).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(response.bodyUsed).toBe(true);
+  });
+
+  it('uses the existing sanitized failure path when releasing an availability body fails', async () => {
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1])); controller.close(); },
+      cancel: () => { throw new Error(`cancel failed for ${SECRET_URL}`); },
+    }));
+    const error = await checkUrl({
+      url: SECRET_URL, method: 'GET', signatureMethod: 'GET', verification: 'availability',
+      fetch: async () => response,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'unavailable' });
+    expect(error instanceof Error ? error.message : error).not.toContain('secret-value');
+  });
+
+  it('keeps checksum verification as the default for an unsigned HEAD', async () => {
+    const result = await checkUrl({
+      url: 'https://cdn.example/note.txt', method: 'HEAD', signatureMethod: 'unsigned',
+      fetch: async () => new Response(null, { status: 200 }),
+    });
+    expect(result).toMatchObject({ status: 'mismatch', code: 'checksum_unavailable', httpStatus: 200 });
+    expect(result.checksum).toBeUndefined();
+  });
+
+  it.each(['GET', 'HEAD'] as const)('rejects expectedChecksum with %s availability before fetching', async method => {
+    const fetch = vi.fn(async () => new Response(null, { status: 200 }));
+    await expect(checkUrl({
+      url: SECRET_URL, method, signatureMethod: method, verification: 'availability',
+      expectedChecksum: sha256Checksum(new Uint8Array()), fetch,
+    })).rejects.toMatchObject({ code: 'config_invalid' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([SECRET_URL, 'https://cdn.example/note.txt?cache=secret-value', 'https://cdn.example/note.txt?'])(
+    'rejects a query on an explicitly unsigned URL before fetching (%s)', async url => {
+      const fetch = vi.fn(async () => new Response(null, { status: 200 }));
+      const error = await checkUrl({
+        url, method: 'HEAD', signatureMethod: 'unsigned', verification: 'availability', fetch,
+      }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(StorageError);
+      expect(error).toMatchObject({ code: 'config_invalid' });
+      expect(error instanceof Error ? error.message : error).not.toContain('secret-value');
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['GET', 'PUT', undefined] as const)('keeps HEAD method binding for availability with signature %s', async signatureMethod => {
+    const fetch = vi.fn(async () => new Response(null, { status: 200 }));
+    await expect(checkUrl({
+      url: SECRET_URL, method: 'HEAD', signatureMethod, verification: 'availability', fetch,
+    })).rejects.toMatchObject({ code: 'config_invalid' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: 403, expected: 'forbidden' }, { status: 404, expected: 'not_found' },
+    { status: 301, expected: 'redirected' }, { status: 302, expected: 'redirected' },
+    { status: 303, expected: 'redirected' }, { status: 307, expected: 'redirected' },
+    { status: 308, expected: 'redirected' }, { status: 500, expected: 'unavailable' },
+    { status: 400, expected: 'unavailable' }, { status: 401, expected: 'unavailable' },
+    { status: 408, expected: 'unavailable' }, { status: 409, expected: 'unavailable' },
+    { status: 422, expected: 'unavailable' }, { status: 429, expected: 'unavailable' },
+    { status: 503, expected: 'unavailable' }, { status: 504, expected: 'unavailable' },
+  ])('preserves HTTP $status semantics for public availability', async ({ status, expected }) => {
+    const result = await checkUrl({
+      url: 'https://cdn.example/note.txt', method: 'HEAD', signatureMethod: 'unsigned', verification: 'availability',
+      fetch: async (_url, init) => {
+        expect(init.redirect).toBe('manual');
+        return new Response(null, { status, headers: { location: SECRET_URL } });
+      },
+    });
+    expect(result.status).toBe(expected);
+    expect(result.httpStatus).toBe(status);
+    expect(result.checksum).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('secret-value');
+  });
+
+  it('keeps media type constraints for public availability', async () => {
+    const result = await checkUrl({
+      url: 'https://cdn.example/image.png', method: 'HEAD', signatureMethod: 'unsigned',
+      verification: 'availability', expectedMediaType: 'image/png',
+      fetch: async () => new Response(null, { status: 200, headers: { 'content-type': 'text/html' } }),
+    });
+    expect(result).toMatchObject({ status: 'mismatch', mediaType: 'text/html', httpStatus: 200 });
+    expect(result.checksum).toBeUndefined();
+  });
+
+  it('rejects an already aborted public availability request without fetching', async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 200 }));
+    await expect(checkUrl({
+      url: 'https://cdn.example/note.txt', method: 'HEAD', signatureMethod: 'unsigned', verification: 'availability',
+      signal: AbortSignal.abort(), fetch,
+    })).rejects.toMatchObject({ code: 'cancelled' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('preserves sanitized fetch failures for signed availability', async () => {
+    const error = await checkUrl({
+      url: SECRET_URL, method: 'HEAD', signatureMethod: 'HEAD', verification: 'availability',
+      fetch: async () => { throw new Error(`request failed for ${SECRET_URL}`); },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'unavailable' });
+    expect(error).not.toHaveProperty('httpStatus');
+    expect(error instanceof Error ? error.message : error).not.toContain('secret-value');
+  });
+
   it('rejects a HEAD probe signed for GET before fetch', async () => {
     let calls = 0;
     const error = await checkUrl({
@@ -54,6 +209,7 @@ describe('checkUrl', () => {
 
     expect(calls).toBe(1);
     expect(result.status).toBe('redirected');
+    expect(result.httpStatus).toBe(status);
     expect(result.status).not.toBe('passed');
     expect(result.checkedAt).toBe('2024-01-02T03:04:05.000Z');
     expect(JSON.stringify(result)).not.toContain('secret-value');
@@ -74,6 +230,7 @@ describe('checkUrl', () => {
 
     expect(forbidden.status).toBe('forbidden');
     expect(missing.status).toBe('not_found');
+    expect(forbidden.httpStatus).toBe(403); expect(missing.httpStatus).toBe(404);
     expect(JSON.stringify(forbidden)).not.toContain('secret-value');
     expect(JSON.stringify(missing)).not.toContain('?');
   });
@@ -91,6 +248,7 @@ describe('checkUrl', () => {
     });
 
     expect(result.status).toBe('mismatch');
+    expect(result.httpStatus).toBe(200);
     expect(result.status).not.toBe('passed');
   });
 
@@ -113,9 +271,11 @@ describe('checkUrl', () => {
     });
 
     expect(matched.status).toBe('passed');
+    expect(matched.httpStatus).toBe(200);
     expect(matched.checksum).toEqual(checksum);
     expect(JSON.stringify(matched)).not.toContain('etag-not-checksum');
     expect(different.status).toBe('mismatch');
+    expect(different.httpStatus).toBe(200);
     expect(different.status).not.toBe('passed');
     expect(different.checksum).toEqual(checksum);
   });
@@ -152,6 +312,7 @@ describe('checkUrl', () => {
     });
 
     expect(result.status).not.toBe('passed');
+    expect(result.httpStatus).toBe(200);
   });
 
   it('rejects HEAD without a HEAD signature before fetch', async () => {

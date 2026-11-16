@@ -29,6 +29,7 @@ export type ProbeStatus =
 export type ProbeResult = Readonly<{
   status: ProbeStatus;
   checkedAt: string;
+  httpStatus?: number;
   byteLength?: number;
   checksum?: Checksum;
   mediaType?: string;
