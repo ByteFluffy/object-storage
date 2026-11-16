@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { createStorage } from '../../src/core/storage.js';
 import { createMemoryDriver } from '../../src/drivers/memory.js';
+import type { StorageDriver } from '../../src/core/contracts.js';
 
 const ABC_SHA256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
 
@@ -48,7 +49,7 @@ describe('Storage.finalize', () => {
       source: { kind: 'bytes', data },
     });
     const inner = storage;
-    const driver = {
+    const driver: StorageDriver = {
       storageId: 'local',
       capabilities: {
         put: true,

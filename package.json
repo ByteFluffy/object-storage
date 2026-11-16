@@ -1,8 +1,15 @@
 {
-  "name": "object-storage",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Shared object storage operations for server upload, browser direct upload, and explicit finalize. Not yet published.",
+  "name": "@byte_fluffy/object-storage",
+  "version": "0.1.0",
+  "description": "Shared object storage operations for server upload, browser direct upload, and explicit finalize.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ByteFluffy/object-storage.git"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "type": "module",
   "files": [
     "dist",
@@ -55,6 +62,7 @@
     }
   },
   "scripts": {
+    "prepack": "npm run build && npm run typecheck && npm test && npm run test:package",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run tests/unit tests/package/entry-boundary.test.ts",

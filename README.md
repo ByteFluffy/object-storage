@@ -1,8 +1,8 @@
-# object-storage
+# @byte_fluffy/object-storage
 
 三个应用共用的对象存储包。上传、处理、探测和交付判断是四件独立的事：处理成功不表示已经上传，上传成功不表示链接已验证，判断够用也不表示已经处理。
 
-当前版本 `0.0.0`，`private`，还没有发布到 npm。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
+当前版本 `0.1.0`，发布到个人 npm scope `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
 
 ## 架构
 
@@ -90,17 +90,17 @@ docs/architecture.md
 
 | 导入 | 用途 |
 | --- | --- |
-| `object-storage` | 上传、封存、读取、临时产物 |
-| `object-storage/browser` | 浏览器执行 PUT |
-| `object-storage/server` | PUT、GET、分片计划 |
-| `object-storage/delivery` | `assessDelivery` |
-| `object-storage/drivers/memory` | 内存驱动 |
-| `object-storage/drivers/tos` | TOS 驱动 |
-| `object-storage/drivers/s3` | S3 驱动 |
-| `object-storage/plugins/probe` | 探测 |
-| `object-storage/plugins/cleanup` | 清理 |
-| `object-storage/plugins/image` | 图片 |
-| `object-storage/plugins/media` | 音视频 |
+| `@byte_fluffy/object-storage` | 上传、封存、读取、临时产物 |
+| `@byte_fluffy/object-storage/browser` | 浏览器执行 PUT |
+| `@byte_fluffy/object-storage/server` | PUT、GET、分片计划 |
+| `@byte_fluffy/object-storage/delivery` | `assessDelivery` |
+| `@byte_fluffy/object-storage/drivers/memory` | 内存驱动 |
+| `@byte_fluffy/object-storage/drivers/tos` | TOS 驱动 |
+| `@byte_fluffy/object-storage/drivers/s3` | S3 驱动 |
+| `@byte_fluffy/object-storage/plugins/probe` | 探测 |
+| `@byte_fluffy/object-storage/plugins/cleanup` | 清理 |
+| `@byte_fluffy/object-storage/plugins/image` | 图片 |
+| `@byte_fluffy/object-storage/plugins/media` | 音视频 |
 
 `src/index.ts` 不导入 Sharp、FFmpeg 或云 SDK。浏览器入口不包含 Node 内置模块和云凭证。
 
@@ -117,13 +117,21 @@ docs/architecture.md
 - 音视频转码、压缩、提取、裁剪、拼接。路径、码率和分辨率由调用方传入，不用截断凑体积。
 - `assessDelivery` 指出该调用哪个现有函数，不填处理参数。
 
+## 安装
+
+```sh
+npm install @byte_fluffy/object-storage
+```
+
+S3、TOS、图片处理分别按需安装对应的可选 peer dependency：`@aws-sdk/client-s3` 与 `@aws-sdk/s3-request-presigner`、`@volcengine/tos-sdk`、`sharp`。FFmpeg 由宿主提供。
+
 ## 调用示例
 
 内存驱动上传并封存，见 [examples/server-archive.ts](examples/server-archive.ts)。
 
 ```ts
-import { createStorage } from 'object-storage';
-import { createMemoryDriver } from 'object-storage/drivers/memory';
+import { createStorage } from '@byte_fluffy/object-storage';
+import { createMemoryDriver } from '@byte_fluffy/object-storage/drivers/memory';
 
 const storage = createStorage({
   drivers: [createMemoryDriver({ storageId: 'local' })],
@@ -149,8 +157,8 @@ const sealed = await storage.finalize({
 交付判断和 GET 计划的调用形状见 [examples/calls.ts](examples/calls.ts)。判断结果可能是 `usable`、`adapt`、`insufficient_evidence` 或 `unsupported`。GET 计划的 `url` 含签名，不要写进日志。
 
 ```ts
-import { assessDelivery } from 'object-storage/delivery';
-import { createSingleGetPlan } from 'object-storage/server';
+import { assessDelivery } from '@byte_fluffy/object-storage/delivery';
+import { createSingleGetPlan } from '@byte_fluffy/object-storage/server';
 
 const fit = assessDelivery(
   { mediaType: 'image/png', byteLength: 120_000, width: 1600, height: 900 },
@@ -177,8 +185,8 @@ npm run build
 npm run test:package
 ```
 
-`npm run test:integration` 在没有 `OBJECT_STORAGE_LIVE_TEST=1` 时失败退出。配置了 `OBJECT_STORAGE_S3_BUCKET`、`OBJECT_STORAGE_S3_REGION`、`OBJECT_STORAGE_S3_ENDPOINT`、`OBJECT_STORAGE_S3_ACCESS_KEY_ID` 和 `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` 之后，它只对 `object-storage-smoke/` 前缀做一次上传、签名、检查和删除。
+`npm run test:integration` 在没有 `OBJECT_STORAGE_LIVE_TEST=1` 时失败退出。配置了 `OBJECT_STORAGE_S3_BUCKET`、`OBJECT_STORAGE_S3_REGION`、`OBJECT_STORAGE_S3_ENDPOINT`、`OBJECT_STORAGE_S3_ACCESS_KEY_ID` 和 `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` 之后，它只对 `@byte_fluffy/object-storage-smoke/` 前缀做一次上传、签名、检查和删除。
 
 ## 不做的事
 
-包不保存云凭证，不改桶规则，不建数据库、队列或常驻轮询。不自动把一个地区的对象拉到另一个地区。不内置某种地区默认格式。npm 发布和镜像到组织仓库另行决定。
+包不保存云凭证，不改桶规则，不建数据库、队列或常驻轮询。不自动把一个地区的对象拉到另一个地区。不内置某种地区默认格式。迁移到组织 scope 另行决定。
