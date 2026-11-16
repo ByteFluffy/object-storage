@@ -1,6 +1,6 @@
 {
   "name": "@byte_fluffy/object-storage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared object storage operations for server upload, browser direct upload, and explicit finalize.",
   "repository": {
     "type": "git",
@@ -56,6 +56,10 @@
       "types": "./dist/plugins/image/index.d.ts",
       "import": "./dist/plugins/image/index.js"
     },
+    "./build/esbuild": {
+      "types": "./dist/build/esbuild.d.ts",
+      "import": "./dist/build/esbuild.js"
+    },
     "./plugins/media": {
       "types": "./dist/plugins/media/index.d.ts",
       "import": "./dist/plugins/media/index.js"
@@ -76,21 +80,32 @@
     "@aws-sdk/client-s3": "3.1007.0",
     "@aws-sdk/s3-request-presigner": "3.1007.0",
     "@volcengine/tos-sdk": "2.9.1",
-    "sharp": "0.34.5"
+    "esbuild": "^0.28.0"
   },
   "peerDependenciesMeta": {
-    "@aws-sdk/client-s3": { "optional": true },
-    "@aws-sdk/s3-request-presigner": { "optional": true },
-    "@volcengine/tos-sdk": { "optional": true },
-    "sharp": { "optional": true }
+    "@aws-sdk/client-s3": {
+      "optional": true
+    },
+    "@aws-sdk/s3-request-presigner": {
+      "optional": true
+    },
+    "@volcengine/tos-sdk": {
+      "optional": true
+    },
+    "esbuild": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "3.1007.0",
     "@aws-sdk/s3-request-presigner": "3.1007.0",
     "@types/node": "22.19.1",
     "@volcengine/tos-sdk": "2.9.1",
-    "sharp": "0.34.5",
+    "esbuild": "0.28.0",
     "typescript": "5.9.3",
     "vitest": "4.1.11"
+  },
+  "dependencies": {
+    "sharp": "0.34.5"
   }
 }

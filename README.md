@@ -123,7 +123,29 @@ docs/architecture.md
 npm install @byte_fluffy/object-storage
 ```
 
-S3、TOS、图片处理分别按需安装对应的可选 peer dependency：`@aws-sdk/client-s3` 与 `@aws-sdk/s3-request-presigner`、`@volcengine/tos-sdk`、`sharp`。FFmpeg 由宿主提供。
+S3、TOS 按需安装对应的可选 peer dependency：`@aws-sdk/client-s3` 与 `@aws-sdk/s3-request-presigner`、`@volcengine/tos-sdk`。图片插件的 Sharp 依赖由本包安装和维护，调用方无需直接安装。FFmpeg 由宿主提供。
+
+### Bundled server applications
+
+Image processing stays behind `@byte_fluffy/object-storage/plugins/image`. Metadata reports display dimensions after EXIF orientation, and conversion applies that orientation before removing metadata. Originals are never modified.
+
+For esbuild applications that deploy a standalone output directory, use the package's build plugin:
+
+```js
+import { build } from 'esbuild';
+import { objectStorageImagePlugin } from '@byte_fluffy/object-storage/build/esbuild';
+
+await build({
+  entryPoints: ['src/main.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  outfile: 'dist/main.mjs',
+  plugins: [objectStorageImagePlugin()],
+});
+```
+
+Deploy the entire `dist` directory, including its generated `node_modules`. The plugin keeps native binaries outside the JavaScript bundle and copies the image engine's installed runtime dependencies. Build on the same operating system and architecture as the deployment target. The build helper requires esbuild `^0.28.0`; normal runtime imports do not load it.
 
 ## 调用示例
 

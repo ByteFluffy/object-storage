@@ -23,8 +23,8 @@ export async function readDecodedMetadata(factory: SharpFactory, data: Uint8Arra
     const pages = meta.pages !== undefined && meta.pages > 0 ? meta.pages : 1;
     return {
       format: meta.format,
-      width: meta.width,
-      height: meta.height,
+      width: meta.autoOrient.width,
+      height: meta.autoOrient.height,
       hasAlpha: meta.hasAlpha,
       pages,
     };
@@ -79,6 +79,8 @@ export async function encodeWithSharp(input: Readonly<{
 
   try {
     let pipeline = input.firstFrame ? input.factory(input.data, { pages: 1 }) : input.factory(input.data);
+    // Encoding strips EXIF, so apply its display orientation before removing metadata.
+    pipeline = pipeline.autoOrient();
     if (input.flatten && input.background) {
       pipeline = pipeline.flatten({
         background: { r: input.background.r, g: input.background.g, b: input.background.b },

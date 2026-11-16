@@ -111,6 +111,22 @@ const looseTarget: TargetSize = {
 };
 
 describe('image plugin', () => {
+  it('keeps EXIF display orientation when converting and resizing', async () => {
+    const input = await sharp({ create: { width: 40, height: 20, channels: 3, background: '#c02030' } })
+      .withMetadata({ orientation: 6 }).jpeg().toBuffer();
+    expect(await readImageMetadata({ source: { kind: 'bytes', data: input } })).toMatchObject({ width: 20, height: 40 });
+    const converted = await convertImage({ source: { kind: 'bytes', data: input }, outputFormat: 'png' });
+    const resized = await resizeImage({ source: { kind: 'bytes', data: input }, outputFormat: 'png', maxHeight: 10, allowUpscale: false });
+    try {
+      expect(await sharp(await converted.artifact.read()).metadata()).toMatchObject({ width: 20, height: 40 });
+      expect(await sharp(await resized.artifact.read()).metadata()).toMatchObject({ width: 5, height: 10 });
+      expect((await sharp(input).metadata()).orientation).toBe(6);
+    } finally {
+      await converted.artifact.release();
+      await resized.artifact.release();
+    }
+  });
+
   it('converts a sharp png to jpeg with distinct checksums and releases only the artifact', async () => {
     await withDirectory(async (directory) => {
       const inputPath = join(directory, 'input.png');
