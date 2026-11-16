@@ -80,6 +80,7 @@ export interface StorageDriver {
   presignPut?(input: PresignPutInput): Promise<DirectUploadPlan>;
   presignGet?(input: PresignGetInput): Promise<DirectReadPlan>;
   createMultipart?(input: CreateMultipartInput): Promise<MultipartSession>;
+  uploadPart?(input: UploadPartInput): Promise<{ etag: string }>;
   presignPart?(input: PresignPartInput): Promise<DirectUploadPlan>;
   completeMultipart?(input: CompleteMultipartInput): Promise<{ etag: string | null }>;
   abortMultipart?(input: AbortMultipartInput): Promise<void>;
@@ -112,12 +113,21 @@ export type CreateMultipartInput = Readonly<{
   object: ObjectRef;
   contentType?: string;
   partSize: number;
-  totalBytes: number;
+  totalBytes?: number;
+  signal?: AbortSignal;
 }>;
 
 export type MultipartSession = Readonly<{
   uploadId: string;
-  partCount: number;
+  partCount?: number;
+}>;
+
+export type UploadPartInput = Readonly<{
+  object: ObjectRef;
+  uploadId: string;
+  partNumber: number;
+  data: Uint8Array;
+  signal?: AbortSignal;
 }>;
 
 export type PresignPartInput = Readonly<{
@@ -131,11 +141,14 @@ export type CompleteMultipartInput = Readonly<{
   object: ObjectRef;
   uploadId: string;
   parts: readonly { partNumber: number; etag: string }[];
+  precondition?: PutPrecondition;
+  signal?: AbortSignal;
 }>;
 
 export type AbortMultipartInput = Readonly<{
   object: ObjectRef;
   uploadId: string;
+  signal?: AbortSignal;
 }>;
 
 export type UploadRequest = Readonly<{
@@ -148,6 +161,8 @@ export type UploadRequest = Readonly<{
   expectedChecksum?: Checksum;
   precondition?: PutPrecondition;
   multipart?: 'required';
+  multipartOptions?: Readonly<{ thresholdBytes: number; partSizeBytes: number }>;
+  onProgress?: (uploadedBytes: number) => void | Promise<void>;
 }>;
 
 export type FinalizeRequest = Readonly<{

@@ -1,23 +1,20 @@
 import type {
   AbortMultipartInput,
+  CompleteMultipartInput,
   CreateMultipartInput,
   MultipartSession,
-  ObjectRef,
   StorageDriver,
 } from '../core/contracts.js';
 import { StorageError } from '../core/errors.js';
 
-export type CompleteMultipartPlanInput = Readonly<{
-  object: ObjectRef;
-  uploadId: string;
+export type CompleteMultipartPlanInput = CompleteMultipartInput & Readonly<{
   partCount: number;
-  parts: readonly { partNumber: number; etag: string }[];
 }>;
 
 export async function createMultipartPlan(
   driver: StorageDriver,
-  input: CreateMultipartInput,
-): Promise<MultipartSession> {
+  input: CreateMultipartInput & Readonly<{ totalBytes: number }>,
+): Promise<MultipartSession & Readonly<{ partCount: number }>> {
   assertPartRequest(input.partSize, input.totalBytes);
   if (typeof driver.createMultipart !== 'function' || driver.capabilities.multipart === null) {
     throw new StorageError('capability_unsupported', 'multipart is not available');
@@ -28,6 +25,7 @@ export async function createMultipartPlan(
     partSize: input.partSize,
     totalBytes: input.totalBytes,
     ...(input.contentType === undefined ? {} : { contentType: input.contentType }),
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
   });
   if (session.uploadId.length === 0) throw new StorageError('unavailable', 'multipart upload id is missing');
   return { uploadId: session.uploadId, partCount };
@@ -45,6 +43,8 @@ export async function completeMultipartPlan(
     object: input.object,
     uploadId: input.uploadId,
     parts,
+    ...(input.precondition === undefined ? {} : { precondition: input.precondition }),
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
   });
 }
 

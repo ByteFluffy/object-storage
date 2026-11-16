@@ -39,6 +39,104 @@ function clientOf(send: S3ObjectClient['send'], presign?: S3ObjectClient['presig
 }
 
 describe('S3 driver', () => {
+  it('serializes multipart bytes and conditional completion through the installed SDK without network I/O', async () => {
+    const wire: { method: string; headers: Record<string, string>; body?: unknown }[] = [];
+    const sdk = createS3Client({ region: 'us-east-1', endpoint: 'https://s3.example',
+      credentials: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, maxAttempts: 1,
+      requestHandler: { handle: async (request: typeof wire[number]) => {
+        wire.push(request);
+        const body = request.method === 'POST'
+          ? new TextEncoder().encode('<CompleteMultipartUploadResult><ETag>"sdk-whole"</ETag></CompleteMultipartUploadResult>') : new Uint8Array();
+        return { response: { statusCode: 200, headers: { etag: '"sdk-part"' }, body } };
+      } },
+    });
+    try {
+      const driver = createS3Driver({ storageId: 's3-main', bucket: 'media', client: bindS3Client(sdk) });
+      const part = await driver.uploadPart!({ object: ref('stream.bin'), uploadId: 'up-1', partNumber: 1, data: new Uint8Array([1, 2, 3]) });
+      expect(part.etag).toBe('"sdk-part"');
+      expect(wire[0]!.method).toBe('PUT'); expect(wire[0]!.headers['content-length']).toBe('3');
+      await driver.completeMultipart!({ object: ref('stream.bin'), uploadId: 'up-1', parts: [{ partNumber: 1, etag: part.etag }], precondition: { ifNoneMatch: '*' } });
+      expect(wire[1]!.method).toBe('POST'); expect(wire[1]!.headers['if-none-match']).toBe('*');
+    } finally { sdk.destroy(); }
+  });
+
+  it('creates an unknown-length multipart session without inventing a part count', async () => {
+    const signal = new AbortController().signal;
+    const sent: { command: object; options: unknown }[] = [];
+    const { client } = clientOf(async (command, options) => {
+      sent.push({ command, options });
+      return { UploadId: 'stream-1' };
+    });
+    const driver = createS3Driver({ storageId: 's3-main', bucket: 'media', client });
+    await expect(driver.createMultipart!({ object: ref('stream.bin'), partSize: 8 * 1024 * 1024, signal }))
+      .resolves.toEqual({ uploadId: 'stream-1' });
+    expect(sent[0]!.command).toBeInstanceOf(CreateMultipartUploadCommand);
+    expect(sent[0]!.options).toEqual({ abortSignal: signal });
+  });
+
+  it('uploads one server-side part as the exact bounded bytes with cancellation', async () => {
+    const data = new Uint8Array([0, 1, 2, 255]);
+    const signal = new AbortController().signal;
+    const sent: { command: object; options: unknown }[] = [];
+    const { client } = clientOf(async (command, options) => {
+      sent.push({ command, options }); return { ETag: '"part-2"' };
+    });
+    const driver = createS3Driver({ storageId: 's3-main', bucket: 'media', client });
+    await expect(driver.uploadPart!({ object: ref('stream.bin'), uploadId: 'stream-1', partNumber: 2, data, signal }))
+      .resolves.toEqual({ etag: '"part-2"' });
+    expect(sent[0]!.command).toBeInstanceOf(UploadPartCommand);
+    expect((sent[0]!.command as UploadPartCommand).input).toEqual({ Bucket: 'media', Key: 'stream.bin',
+      UploadId: 'stream-1', PartNumber: 2, Body: data, ContentLength: 4 });
+    expect(sent[0]!.options).toEqual({ abortSignal: signal });
+  });
+
+  it.each([undefined, ''])('rejects a part response without a usable ETag: %s', async ETag => {
+    const driver = createS3Driver({ storageId: 's3-main', bucket: 'media', client: clientOf(async () => ({ ETag })).client });
+    await expect(driver.uploadPart!({ object: ref('stream.bin'), uploadId: 'stream-1', partNumber: 1, data: new Uint8Array([1]) }))
+      .rejects.toMatchObject({ code: 'unavailable' });
+  });
+
+  it('completes with the actual conditional-write field and keeps cleanup cancellation independent', async () => {
+    const sent: { command: object; options: unknown }[] = [];
+    const { client } = clientOf(async (command, options) => { sent.push({ command, options }); return { ETag: '"whole"' }; });
+    const driver = createS3Driver({ storageId: 's3-main', bucket: 'media', client });
+    const signal = new AbortController().signal;
+    await expect(driver.completeMultipart!({ object: ref('stream.bin'), uploadId: 'stream-1',
+      parts: [{ partNumber: 1, etag: '"part"' }], precondition: { ifNoneMatch: '*' }, signal }))
+      .resolves.toEqual({ etag: '"whole"' });
+    expect((sent[0]!.command as CompleteMultipartUploadCommand).input.IfNoneMatch).toBe('*');
+    expect(sent[0]!.options).toEqual({ abortSignal: signal });
+    const cleanupSignal = new AbortController().signal;
+    await driver.abortMultipart!({ object: ref('stream.bin'), uploadId: 'stream-1', signal: cleanupSignal });
+    expect(sent[1]!.command).toBeInstanceOf(AbortMultipartUploadCommand);
+    expect(sent[1]!.options).toEqual({ abortSignal: cleanupSignal });
+  });
+
+  it('keeps a successful creation receipt when the caller cancels during independent admission', async () => {
+    const caller = new AbortController();
+    const admission = new AbortController();
+    const { client } = clientOf(async () => { caller.abort(); return { UploadId: 'created-before-cancel' }; });
+    const driver = createS3Driver({ storageId: 's3-main', bucket: 'media', client });
+    await expect(driver.createMultipart!({ object: ref('stream.bin'), partSize: 8 * 1024 * 1024, signal: admission.signal }))
+      .resolves.toEqual({ uploadId: 'created-before-cancel' });
+    expect(caller.signal.aborted).toBe(true);
+  });
+
+  it('actively rejects a cancelled in-flight part with a sanitized storage error', async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const admitted = new Promise<void>(resolve => { started = resolve; });
+    const { client } = clientOf((_command, options) => new Promise((_resolve, reject) => {
+      options!.abortSignal!.addEventListener('abort', () => reject(Object.assign(new Error(SECRET_MESSAGE), { name: 'AbortError' })), { once: true });
+      started();
+    }));
+    const driver = createS3Driver({ storageId: 's3-main', bucket: 'media', client });
+    const uploading = driver.uploadPart!({ object: ref('stream.bin'), uploadId: 'stream-1', partNumber: 1,
+      data: new Uint8Array([1]), signal: controller.signal });
+    await admitted; controller.abort();
+    await expect(uploading).rejects.toMatchObject({ code: 'cancelled', message: 'operation cancelled' });
+  });
+
   it('exposes the real client helpers without calling them', () => {
     expect(typeof createS3Client).toBe('function');
     expect(typeof bindS3Client).toBe('function');

@@ -14,6 +14,7 @@ import type {
   PresignGetInput,
   PresignPutInput,
   StorageDriver,
+  UploadPartInput,
 } from '../core/contracts.js';
 import { StorageError, type StorageErrorCode } from '../core/errors.js';
 import { sha256Checksum } from '../io/hash.js';
@@ -32,6 +33,11 @@ export type TosResult<T> = {
   requestId?: string;
 };
 
+/**
+ * Native TOS SDK 2.9.1 multipart methods expose no per-request cancellation.
+ * Signals gate admission only; in-flight calls retain their eventual receipts.
+ * Use the S3-compatible driver when physical AbortSignal cancellation is required.
+ */
 export type TosObjectClient = {
   putObject(input: {
     bucket?: string;
@@ -39,8 +45,8 @@ export type TosObjectClient = {
     body?: Buffer;
     contentType?: string;
     forbidOverwrite?: boolean;
-  }): Promise<TosResult<Record<string, string | undefined>>>;
-  headObject(input: { bucket?: string; key: string; versionId?: string }): Promise<TosResult<TosHeaders>>;
+  }): Promise<TosResult<unknown>>;
+  headObject(input: { bucket?: string; key: string; versionId?: string }): Promise<TosResult<unknown>>;
   getObject(input: { bucket?: string; key: string; versionId?: string }): Promise<TosResult<Buffer>>;
   deleteObject(input: { bucket?: string; key: string; versionId?: string }): Promise<TosResult<unknown>>;
   copyObject(input: {
@@ -64,11 +70,19 @@ export type TosObjectClient = {
     contentType?: string;
     forbidOverwrite?: boolean;
   }): Promise<TosResult<{ UploadId?: string }>>;
+  uploadPart(input: {
+    bucket?: string;
+    key: string;
+    uploadId: string;
+    partNumber: number;
+    body: Buffer;
+  }): Promise<TosResult<{ ETag?: string }>>;
   completeMultipartUpload(input: {
     bucket?: string;
     key: string;
     uploadId: string;
     parts: { eTag: string; partNumber: number }[];
+    forbidOverwrite?: boolean;
   }): Promise<TosResult<{ ETag?: string }>>;
   abortMultipartUpload(input: { bucket?: string; key: string; uploadId: string }): Promise<TosResult<undefined>>;
 };
@@ -171,6 +185,7 @@ export function createTosDriver(options: {
       return signGet(client, bucket, input.object.key, input.expiresInSeconds);
     },
     async createMultipart(input: CreateMultipartInput) {
+      throwIfAborted(input.signal);
       assertPartRequest(input.partSize, input.totalBytes);
       try {
         const response = await client.createMultipartUpload({
@@ -180,9 +195,22 @@ export function createTosDriver(options: {
         });
         const uploadId = textField(response, 'UploadId') ?? uploadIdOf(response.data);
         if (!uploadId) throw new StorageError('unavailable', 'multipart upload id is missing');
-        return { uploadId, partCount: partCountFor(input.partSize, input.totalBytes) };
+        return { uploadId,
+          ...(input.totalBytes === undefined ? {} : { partCount: partCountFor(input.partSize, input.totalBytes) }) };
       } catch (error) {
-        throw mapTosError(error);
+        throw mapTosError(error, input.signal);
+      }
+    },
+    async uploadPart(input: UploadPartInput) {
+      throwIfAborted(input.signal);
+      try {
+        const response = await client.uploadPart({ bucket, key: input.object.key, uploadId: input.uploadId,
+          partNumber: input.partNumber, body: Buffer.from(input.data) });
+        const etag = textField(response, 'ETag') ?? textField(response, 'etag');
+        if (!etag) throw new StorageError('unavailable', 'multipart part etag is missing');
+        return { etag };
+      } catch (error) {
+        throw mapTosError(error, input.signal);
       }
     },
     async presignPart(input: PresignPartInput): Promise<DirectUploadPlan> {
@@ -200,6 +228,7 @@ export function createTosDriver(options: {
       }
     },
     async completeMultipart(input: CompleteMultipartInput) {
+      throwIfAborted(input.signal);
       const parts = normalizedParts(input.parts);
       try {
         const response = await client.completeMultipartUpload({
@@ -207,17 +236,19 @@ export function createTosDriver(options: {
           key: input.object.key,
           uploadId: input.uploadId,
           parts: parts.map((part) => ({ eTag: part.etag, partNumber: part.partNumber })),
+          ...(input.precondition?.ifNoneMatch === '*' ? { forbidOverwrite: true } : {}),
         });
         return { etag: textField(response, 'ETag') ?? textField(response, 'etag') };
       } catch (error) {
-        throw mapTosError(error);
+        throw mapTosError(error, input.signal);
       }
     },
     async abortMultipart(input: AbortMultipartInput) {
+      throwIfAborted(input.signal);
       try {
         await client.abortMultipartUpload({ bucket, key: input.object.key, uploadId: input.uploadId });
       } catch (error) {
-        throw mapTosError(error);
+        throw mapTosError(error, input.signal);
       }
     },
   };
@@ -256,7 +287,7 @@ function signPut(
   }
 }
 
-function statFromHead(response: TosResult<TosHeaders>): ObjectStat {
+function statFromHead(response: TosResult<unknown>): ObjectStat {
   const length = textField(response, 'content-length');
   if (length === null) throw new StorageError('unavailable', 'object length is missing');
   const crc = textField(response, CRC64_HEADER);
@@ -306,8 +337,8 @@ function byteLengthOf(value: unknown): number {
   throw new StorageError('unavailable', 'object length is missing');
 }
 
-function assertPartRequest(partSize: number, totalBytes: number): void {
-  if (!Number.isInteger(partSize) || partSize < 1 || !Number.isInteger(totalBytes) || totalBytes < 0) {
+function assertPartRequest(partSize: number, totalBytes: number | undefined): void {
+  if (!Number.isInteger(partSize) || partSize < 1 || totalBytes !== undefined && (!Number.isInteger(totalBytes) || totalBytes < 0)) {
     throw new StorageError('config_invalid', 'partSize and totalBytes must describe the object');
   }
 }

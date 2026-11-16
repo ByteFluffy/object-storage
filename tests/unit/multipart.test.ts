@@ -55,6 +55,20 @@ function multipartDriver(): {
 const object = { storageId: 'cloud', key: 'blob.bin' };
 
 describe('multipart plans', () => {
+  it('preserves cancellation and conditional completion through the plan facade', async () => {
+    const { driver, created, completed, aborted } = multipartDriver();
+    const signal = new AbortController().signal;
+    await createMultipartPlan(driver, { object, partSize: 100, totalBytes: 100, signal });
+    expect(created[0]?.signal).toBe(signal);
+    await completeMultipartPlan(driver, {
+      object, uploadId: 'up-1', partCount: 1, parts: [{ partNumber: 1, etag: 'part' }],
+      precondition: { ifNoneMatch: '*' }, signal,
+    });
+    expect(completed[0]).toMatchObject({ precondition: { ifNoneMatch: '*' }, signal });
+    await abortMultipartPlan(driver, { object, uploadId: 'up-1', signal });
+    expect(aborted[0]).toMatchObject({ signal });
+  });
+
   it('calculates partCount from the caller partSize and totalBytes', async () => {
     const { driver, created } = multipartDriver();
     await expect(

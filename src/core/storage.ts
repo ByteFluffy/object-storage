@@ -9,31 +9,17 @@ import type {
 } from './contracts.js';
 import { StorageError } from './errors.js';
 import { sha256Checksum } from '../io/hash.js';
-import { readSource } from '../io/sources.js';
+import { uploadToDriver } from './upload.js';
 
 export class Storage {
   constructor(private readonly drivers: ReadonlyMap<string, StorageDriver>) {}
 
   async upload(request: UploadRequest): Promise<UploadResult> {
-    assertKey(request.key);
-    const driver = this.requireDriver(request.storageId);
-    throwIfAborted(request.signal);
-    assertPutSupported(driver, request);
-    const body = await readSource(request.source, {
-      ...(request.maxInputBytes === undefined ? {} : { maxInputBytes: request.maxInputBytes }),
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    const uploaded = await uploadToDriver(request, () => {
+      assertKey(request.key);
+      return this.requireDriver(request.storageId);
     });
-    const checksum = sha256Checksum(body.data);
-    assertExpectedChecksum(request.expectedChecksum, checksum);
-    const written = await driver.put({
-      object: { storageId: request.storageId, key: request.key },
-      data: body.data,
-      checksum,
-      ...(request.contentType === undefined ? {} : { contentType: request.contentType }),
-      ...(request.precondition === undefined ? {} : { precondition: request.precondition }),
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
-    });
-    return resultOf(request.storageId, request.key, body.byteLength, checksum, written.etag, false);
+    return resultOf(request.storageId, request.key, uploaded.byteLength, uploaded.checksum, uploaded.etag, false);
   }
 
   async finalize(request: FinalizeRequest): Promise<UploadResult> {
@@ -112,28 +98,6 @@ export function createStorage(input: Readonly<{ drivers: readonly StorageDriver[
     drivers.set(driver.storageId, driver);
   }
   return new Storage(drivers);
-}
-
-function assertPutSupported(driver: StorageDriver, request: UploadRequest): void {
-  if (request.multipart === 'required' && driver.capabilities.multipart === null) {
-    throw new StorageError('capability_unsupported', 'multipart is not available');
-  }
-  if (!driver.capabilities.put) {
-    throw new StorageError('capability_unsupported', 'put is not available');
-  }
-  if (request.precondition?.ifNoneMatch === '*' && !driver.capabilities.conditionalWrite.ifNoneMatch) {
-    throw new StorageError('capability_unsupported', 'if-none-match is not available');
-  }
-}
-
-function assertExpectedChecksum(expected: Checksum | undefined, actual: Checksum): void {
-  if (!expected) return;
-  if (expected.algorithm !== 'sha256') {
-    throw new StorageError('capability_unsupported', 'only sha256 checksums are verified');
-  }
-  if (expected.value !== actual.value) {
-    throw new StorageError('checksum_mismatch', 'bytes do not match the expected checksum');
-  }
 }
 
 async function reuseOrReject(

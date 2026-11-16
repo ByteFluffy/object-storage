@@ -26,6 +26,7 @@ import type {
   PresignPartInput,
   PresignPutInput,
   StorageDriver,
+  UploadPartInput,
 } from '../core/contracts.js';
 import { StorageError, type StorageErrorCode } from '../core/errors.js';
 import { sha256Checksum } from '../io/hash.js';
@@ -150,11 +151,25 @@ export function createS3Driver(options: {
         Bucket: bucket,
         Key: input.object.key,
         ...(input.contentType === undefined ? {} : { ContentType: input.contentType }),
-      }));
+      }), input.signal);
       if (!isRecord(output) || typeof output.UploadId !== 'string' || output.UploadId.length === 0) {
         throw new StorageError('unavailable', 'multipart upload id is missing');
       }
-      return { uploadId: output.UploadId, partCount: partCountFor(input.partSize, input.totalBytes) };
+      return { uploadId: output.UploadId,
+        ...(input.totalBytes === undefined ? {} : { partCount: partCountFor(input.partSize, input.totalBytes) }) };
+    },
+    async uploadPart(input: UploadPartInput) {
+      const output = await send(client, new UploadPartCommand({
+        Bucket: bucket,
+        Key: input.object.key,
+        UploadId: input.uploadId,
+        PartNumber: input.partNumber,
+        Body: input.data,
+        ContentLength: input.data.byteLength,
+      }), input.signal);
+      const etag = etagOf(output);
+      if (!etag) throw new StorageError('unavailable', 'multipart part etag is missing');
+      return { etag };
     },
     async presignPart(input: PresignPartInput): Promise<DirectUploadPlan> {
       const command = new UploadPartCommand({
@@ -172,10 +187,11 @@ export function createS3Driver(options: {
         Bucket: bucket,
         Key: input.object.key,
         UploadId: input.uploadId,
+        ...(input.precondition?.ifNoneMatch === '*' ? { IfNoneMatch: '*' } : {}),
         MultipartUpload: {
           Parts: parts.map((part) => ({ ETag: part.etag, PartNumber: part.partNumber })),
         },
-      }));
+      }), input.signal);
       return { etag: etagOf(output) };
     },
     async abortMultipart(input: AbortMultipartInput) {
@@ -183,7 +199,7 @@ export function createS3Driver(options: {
         Bucket: bucket,
         Key: input.object.key,
         UploadId: input.uploadId,
-      }));
+      }), input.signal);
     },
   };
 }
@@ -245,8 +261,8 @@ function byteLengthOf(value: unknown): number {
   throw new StorageError('unavailable', 'object length is missing');
 }
 
-function assertPartRequest(partSize: number, totalBytes: number): void {
-  if (!Number.isInteger(partSize) || partSize < 1 || !Number.isInteger(totalBytes) || totalBytes < 0) {
+function assertPartRequest(partSize: number, totalBytes: number | undefined): void {
+  if (!Number.isInteger(partSize) || partSize < 1 || totalBytes !== undefined && (!Number.isInteger(totalBytes) || totalBytes < 0)) {
     throw new StorageError('config_invalid', 'partSize and totalBytes must describe the object');
   }
 }

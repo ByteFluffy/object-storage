@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { sha256Checksum } from '../../src/io/hash.js';
 import { createTosClient, createTosDriver, type TosObjectClient } from '../../src/drivers/tos.js';
 import type { ObjectRef } from '../../src/core/contracts.js';
@@ -24,12 +24,12 @@ function clientOf(overrides: Partial<TosObjectClient> = {}): {
   puts: PutInput[];
   signed: unknown[];
   copies: unknown[];
-  multipart: { created: unknown[]; completed: unknown[]; aborted: unknown[] };
+  multipart: { created: unknown[]; parts: unknown[]; completed: unknown[]; aborted: unknown[] };
 } {
   const puts: PutInput[] = [];
   const signed: unknown[] = [];
   const copies: unknown[] = [];
-  const multipart = { created: [] as unknown[], completed: [] as unknown[], aborted: [] as unknown[] };
+  const multipart = { created: [] as unknown[], parts: [] as unknown[], completed: [] as unknown[], aborted: [] as unknown[] };
   const client: TosObjectClient = {
     async putObject(input) {
       puts.push(input);
@@ -75,6 +75,10 @@ function clientOf(overrides: Partial<TosObjectClient> = {}): {
       multipart.created.push(input);
       return { data: { UploadId: 'up-1' }, statusCode: 200, requestId: 'req-mp' };
     },
+    async uploadPart(input) {
+      multipart.parts.push(input);
+      return { data: { ETag: '"part"' }, statusCode: 200, requestId: 'req-part' };
+    },
     async completeMultipartUpload(input) {
       multipart.completed.push(input);
       return { data: { ETag: '"whole"' }, statusCode: 200, requestId: 'req-done' };
@@ -89,8 +93,83 @@ function clientOf(overrides: Partial<TosObjectClient> = {}): {
 }
 
 describe('TOS driver', () => {
+  it('serializes native multipart and forbidOverwrite through the installed SDK request adapter without network I/O', async () => {
+    const wire: { method?: string; data?: unknown; headers?: unknown }[] = [];
+    const sdk = createTosClient({ region: 'cn-beijing', endpoint: 'tos.example', accessKeyId: 'fixture', accessKeySecret: 'fixture', maxRetryCount: 0 });
+    // The Node SDK normalizer replaces the constructor adapter; replace it on this test-owned client before any request.
+    sdk.opts.requestAdapter = async request => {
+      const chunks: Buffer[] = [];
+      if (request.data?.[Symbol.asyncIterator]) {
+        for await (const chunk of request.data) chunks.push(Buffer.from(chunk));
+        wire.push({ ...request, data: Buffer.concat(chunks) });
+      } else wire.push(request);
+      return { status: 200, statusText: 'OK', headers: { etag: '"sdk-part"' }, data: {}, config: request };
+    };
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client: sdk });
+    const part = await driver.uploadPart!({ object: ref('stream.bin'), uploadId: 'up-1', partNumber: 1, data: new Uint8Array([1, 2, 3]) });
+    expect(part.etag).toBe('"sdk-part"'); expect(wire[0]!.data).toEqual(Buffer.from([1, 2, 3]));
+    await driver.completeMultipart!({ object: ref('stream.bin'), uploadId: 'up-1', parts: [{ partNumber: 1, etag: part.etag }], precondition: { ifNoneMatch: '*' } });
+    expect(wire[1]!.headers).toMatchObject({ 'x-tos-forbid-overwrite': 'true' });
+  });
+
+  it('creates an unknown-length upload without inventing a total or part count', async () => {
+    const { client, multipart } = clientOf();
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    await expect(driver.createMultipart!({ object: ref('stream.bin'), partSize: 8 * 1024 * 1024 }))
+      .resolves.toEqual({ uploadId: 'up-1' });
+    expect(multipart.created).toEqual([{ bucket: 'media', key: 'stream.bin' }]);
+  });
+
+  it('uploads bounded bytes with the real native SDK uploadPart fields', async () => {
+    const { client, multipart } = clientOf();
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    const data = new Uint8Array([0, 1, 255]);
+    await expect(driver.uploadPart!({ object: ref('stream.bin'), uploadId: 'up-1', partNumber: 2, data }))
+      .resolves.toEqual({ etag: '"part"' });
+    expect(multipart.parts).toEqual([{ bucket: 'media', key: 'stream.bin', uploadId: 'up-1', partNumber: 2, body: Buffer.from(data) }]);
+  });
+
+  it.each([undefined, ''])('rejects missing multipart part ETag: %s', async ETag => {
+    const { client } = clientOf({ uploadPart: async () => ({ data: { ETag } }) });
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    await expect(driver.uploadPart!({ object: ref('stream.bin'), uploadId: 'up-1', partNumber: 1, data: new Uint8Array([1]) }))
+      .rejects.toMatchObject({ code: 'unavailable' });
+  });
+
+  it('completes conditionally using the SDK forbidOverwrite field', async () => {
+    const { client, multipart } = clientOf();
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    await expect(driver.completeMultipart!({ object: ref('stream.bin'), uploadId: 'up-1',
+      parts: [{ partNumber: 1, etag: '"part"' }], precondition: { ifNoneMatch: '*' } }))
+      .resolves.toEqual({ etag: '"whole"' });
+    expect(multipart.completed[0]).toMatchObject({ forbidOverwrite: true });
+  });
+
+  it.each(['create', 'upload', 'complete', 'abort'] as const)('rejects cancellation before native multipart %s admission', async operation => {
+    const { client, multipart } = clientOf();
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    const input = { object: ref('stream.bin'), uploadId: 'up-1', signal: AbortSignal.abort() };
+    const result = operation === 'create' ? driver.createMultipart!({ ...input, partSize: 8 * 1024 * 1024 })
+      : operation === 'upload' ? driver.uploadPart!({ ...input, partNumber: 1, data: new Uint8Array([1]) })
+      : operation === 'complete' ? driver.completeMultipart!({ ...input, parts: [{ partNumber: 1, etag: '"part"' }] })
+      : driver.abortMultipart!(input);
+    await expect(result).rejects.toMatchObject({ code: 'cancelled' });
+    expect(multipart).toEqual({ created: [], parts: [], completed: [], aborted: [] });
+  });
+
+  it('preserves a late creation receipt when native SDK admission cannot be physically cancelled', async () => {
+    const controller = new AbortController();
+    const { client } = clientOf({ createMultipartUpload: async () => {
+      controller.abort(); return { data: { UploadId: 'late-receipt' } };
+    } });
+    const driver = createTosDriver({ storageId: 'tos-main', bucket: 'media', client });
+    await expect(driver.createMultipart!({ object: ref('stream.bin'), partSize: 8 * 1024 * 1024, signal: controller.signal }))
+      .resolves.toEqual({ uploadId: 'late-receipt' });
+  });
+
   it('exposes the real client constructor without calling it', () => {
     expect(typeof createTosClient).toBe('function');
+    expectTypeOf<ReturnType<typeof createTosClient>>().toExtend<TosObjectClient>();
   });
 
   it('passes bucket, key, body, content type, and forbidOverwrite to putObject', async () => {
