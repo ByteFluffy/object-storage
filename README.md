@@ -2,7 +2,7 @@
 
 三个应用共用的对象存储包。上传、处理、探测和交付判断是四件独立的事：处理成功不表示已经上传，上传成功不表示链接已验证，判断够用也不表示已经处理。
 
-当前版本 `0.1.0`，发布到个人 npm scope `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
+当前版本 `0.1.2`，个人 npm scope 为 `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
 
 ## 架构
 
@@ -146,6 +146,77 @@ await build({
 ```
 
 Deploy the entire `dist` directory, including its generated `node_modules`. The plugin keeps native binaries outside the JavaScript bundle and copies the image engine's installed runtime dependencies. Build on the same operating system and architecture as the deployment target. The build helper requires esbuild `^0.28.0`; normal runtime imports do not load it.
+
+### Bounded server uploads
+
+`Storage.upload` consumes bytes, files and streams through the same upload path.
+Files are read as streams. SHA-256 is calculated incrementally, and progress is
+reported only after a successful PUT or part receipt. The callback may return a
+promise; the uploader awaits it before reading further.
+
+```ts
+const uploaded = await storage.upload({
+  storageId: 'media',
+  key: 'video/generated.mp4',
+  source: { kind: 'stream', stream: response.body },
+  contentType: 'video/mp4',
+  multipartOptions: {
+    thresholdBytes: 30 * 1024 * 1024,
+    partSizeBytes: 16 * 1024 * 1024,
+  },
+  signal,
+  onProgress: uploadedBytes => reportProgress(uploadedBytes),
+});
+```
+
+Both values are byte counts. The defaults are a 30 MiB multipart threshold and
+16 MiB parts. Reaching the threshold enables multipart; `multipart: 'required'`
+starts a multipart session regardless of length. Part size must satisfy the
+selected driver's limits. Unknown-length input is supported; no total length is
+invented for the multipart session.
+
+Known large inputs need one part buffer. Unknown-length input needs at most
+`max(thresholdBytes, partSizeBytes)` of staging payload, plus the current source
+chunk. Part/ETag metadata grows with the number of parts. This is not a fixed
+process-memory guarantee. A producer that enqueues a whole file in one chunk has
+already allocated that chunk outside the uploader.
+
+Declared length, maximum input size and expected SHA-256 are checked before
+multipart completion. Failure or cancellation cancels the source and aborts an
+admitted session without replacing the original error. Admission and cleanup
+use independent ten-second signals, so an already-cancelled caller signal does
+not prevent session reclamation. The caller still owns and releases its cloud
+client.
+
+S3-compatible drivers forward AbortSignal to in-flight SDK requests. Native TOS
+SDK 2.9.1 does not expose per-request cancellation on its low-level multipart
+methods. That adapter checks cancellation before calls and preserves a late
+creation receipt for cleanup, but cannot promise physical interruption or a
+ten-second hard deadline for an in-flight native TOS request. Applications that
+need these guarantees can use their TOS service's S3-compatible endpoint.
+
+### Public URL availability
+
+Use the existing probe with explicit verification semantics:
+
+```ts
+const result = await checkUrl({
+  url: 'https://media.example/video/generated.mp4',
+  method: 'HEAD',
+  signatureMethod: 'unsigned',
+  verification: 'availability',
+  fetch,
+  signal,
+});
+```
+
+`passed` in availability mode establishes HTTP accessibility only, with the
+actual `httpStatus` and available response metadata. It supplies no content
+checksum. The default checksum mode still reads and verifies content; HEAD is
+not checksum evidence. Availability cannot be combined with expectedChecksum,
+and unsigned URLs cannot contain a query string. Signed HEAD remains bound to
+a HEAD signature. Hosts retain retry scheduling through the existing event
+interface; the package adds no polling loop.
 
 ## 调用示例
 
