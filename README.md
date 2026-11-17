@@ -2,7 +2,7 @@
 
 三个应用共用的对象存储包。上传、处理、探测和交付判断是四件独立的事：处理成功不表示已经上传，上传成功不表示链接已验证，判断够用也不表示已经处理。
 
-当前版本 `0.1.5`，个人 npm scope 为 `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
+当前版本 `0.1.7`，个人 npm scope 为 `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
 
 ## 架构
 
@@ -124,6 +124,21 @@ npm install @byte_fluffy/object-storage
 ```
 
 S3、TOS 按需安装对应的可选 peer dependency：`@aws-sdk/client-s3` 与 `@aws-sdk/s3-request-presigner`、`@volcengine/tos-sdk`。图片插件的 Sharp 依赖由本包安装和维护，调用方无需直接安装。FFmpeg 由宿主提供。
+
+### Source content fingerprints
+
+`fingerprintSource` calculates a source's SHA-256 and actual byte length without uploading or retaining the complete source in memory. It accepts the existing `Source` forms: bytes, a local file, or a readable stream.
+
+```ts
+import { fingerprintSource } from '@byte_fluffy/object-storage';
+
+const first = await fingerprintSource({ kind: 'file', path: '/media/first.png' });
+const second = await fingerprintSource({ kind: 'file', path: '/media/renamed.png' });
+const sameContent = first.byteLength === second.byteLength
+  && first.checksum.value === second.checksum.value;
+```
+
+This compares exact file content: paths, names and filesystem timestamps do not participate, while embedded image metadata does. Empty sources have a valid fingerprint. Streams are consumed once and their reader locks are released on success or failure. Optional `ReadOptions` provide cancellation through `signal` and a caller-chosen `maxBytes` budget; the tool imposes no default size limit. Database lookup, upload reuse and destination selection stay with the caller.
 
 ### Bundled server applications
 

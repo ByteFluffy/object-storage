@@ -2,6 +2,7 @@ export { mergeConfig } from './core/config.js';
 export { createStorage, Storage } from './core/storage.js';
 export { StorageError } from './core/errors.js';
 export { readSource } from './io/sources.js';
+export { fingerprintSource } from './io/hash.js';
 export { createWorkspace } from './io/workspace.js';
 
 export type {

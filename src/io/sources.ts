@@ -1,4 +1,6 @@
+import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import type { Source } from '../core/contracts.js';
 import { StorageError } from '../core/errors.js';
 
@@ -6,6 +8,12 @@ export type SourceBody = Readonly<{
   data: Uint8Array;
   byteLength: number;
 }>;
+
+export function sourceStream(source: Source): ReadableStream<Uint8Array> {
+  if (source.kind === 'stream') return source.stream;
+  if (source.kind === 'file') return Readable.toWeb(createReadStream(source.path), { strategy: { highWaterMark: 0 } }) as ReadableStream<Uint8Array>;
+  return new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(source.data); controller.close(); } });
+}
 
 export async function readSource(
   source: Source,

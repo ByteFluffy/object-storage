@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { Readable } from 'node:stream';
-import type { Checksum, Source, StorageDriver, UploadRequest } from './contracts.js';
+import type { Checksum, StorageDriver, UploadRequest } from './contracts.js';
 import { StorageError } from './errors.js';
+import { sourceStream } from '../io/sources.js';
 
 const DEFAULT_THRESHOLD = 30 * 1024 * 1024;
 const DEFAULT_PART_SIZE = 16 * 1024 * 1024;
@@ -152,12 +151,6 @@ export async function uploadToDriver(request: UploadRequest, resolveDriver: () =
     request.signal?.removeEventListener('abort', cancelReader);
     reader?.releaseLock();
   }
-}
-
-function sourceStream(source: Source): ReadableStream<Uint8Array> {
-  if (source.kind === 'stream') return source.stream;
-  if (source.kind === 'file') return Readable.toWeb(createReadStream(source.path), { strategy: { highWaterMark: 0 } }) as ReadableStream<Uint8Array>;
-  return new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(source.data); controller.close(); } });
 }
 
 function assertMultipart(driver: StorageDriver): void {

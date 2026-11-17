@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { createStorage } from '../../dist/index.js';
+import { createStorage, fingerprintSource } from '../../dist/index.js';
 import { executeDirectUpload } from '../../dist/browser/index.js';
 import { convertImage } from '../../dist/plugins/image/index.js';
 import { probeMedia } from '../../dist/plugins/media/index.js';
@@ -17,6 +17,13 @@ describe('built package entries', () => {
   it('loads the server and browser entries from dist', () => {
     expect(typeof createStorage).toBe('function');
     expect(typeof executeDirectUpload).toBe('function');
+  });
+
+  it('fingerprints bytes through the built public entry', async () => {
+    await expect(fingerprintSource({ kind: 'bytes', data: new TextEncoder().encode('abc') })).resolves.toEqual({
+      byteLength: 3,
+      checksum: { algorithm: 'sha256', value: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' },
+    });
   });
 
   it('keeps Node builtins and cloud SDKs out of the built browser entry', () => {
