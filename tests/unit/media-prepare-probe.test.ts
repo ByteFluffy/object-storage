@@ -48,6 +48,7 @@ afterEach(async () => {
 
 function request(source: ProbeMediaRequest['source'], extra: Partial<ProbeMediaRequest> & {
   probeTimeoutMs?: number; inputArgs?: readonly string[]; maxOutputBytes?: number;
+  durationSource?: 'first-valid' | 'container-or-first-video';
 } = {}) {
   return { source, ffmpegPath: tool, ffprobePath: tool, workspaceDirectory: directory,
     deadlineMs: 2_000, signal: new AbortController().signal, ...extra };
@@ -97,6 +98,51 @@ describe('probeMedia compatibility', () => {
     const args = JSON.parse(await readFile(join(directory, 'args.json'), 'utf8')) as string[];
     expect(args).not.toContain('-protocol_whitelist');
     expect(args).not.toContain('-enable_drefs');
+  });
+});
+
+describe.each(['probeMedia', 'prepareMediaProbe'] as const)('%s duration source policy', entry => {
+  const audio = { codec_type: 'audio', codec_name: 'aac', sample_rate: '48000', channels: 2, duration: '2' };
+  const video = { ...document().streams[0]!, duration: '1.5' };
+
+  it.each([
+    { name: 'audio-first source without container duration', container: undefined, streams: [audio, video], expected: 1500 },
+    { name: 'container priority over stream duration', container: '1.25', streams: [audio, video], expected: 1250 },
+    { name: 'invalid present container duration', container: 'N/A', streams: [audio, video], expected: 0 },
+    { name: 'zero present container duration', container: '0', streams: [audio, video], expected: 0 },
+    { name: 'negative present container duration', container: '-1', streams: [audio, video], expected: 0 },
+    { name: 'only the first video duration', container: undefined, streams: [audio, video, { ...video, duration: '9' }], expected: 1500 },
+    { name: 'invalid first video without borrowing a later video', container: undefined, streams: [audio, { ...video, duration: 'N/A' }, { ...video, duration: '9' }], expected: 0 },
+    { name: 'null container duration falls back to the first video', container: null, streams: [audio, video], expected: 1500 },
+  ])('uses container-or-first-video for $name', async ({ container, streams, expected }) => {
+    await writeFile(join(directory, 'state.json'), JSON.stringify({ probe: {
+      format: { format_name: 'matroska', ...(container === undefined ? {} : { duration: container }) }, streams,
+    } }));
+    const input = request({ kind: 'bytes', data: bytes }, { durationSource: 'container-or-first-video' });
+    const result = entry === 'probeMedia' ? await probeMedia(input) : await prepareMediaProbe(input);
+    try { expect(result.durationMs).toBe(expected); }
+    finally { if ('release' in result && typeof result.release === 'function') await result.release(); }
+    expect(await workspaces()).toEqual([]);
+  });
+
+  it.each([undefined, 'first-valid'] as const)('preserves first-valid behavior when policy is %s', async durationSource => {
+    await writeFile(join(directory, 'state.json'), JSON.stringify({ probe: {
+      format: { format_name: 'matroska', duration: 'N/A' }, streams: [audio, video],
+    } }));
+    const input = request({ kind: 'bytes', data: bytes }, durationSource === undefined ? {} : { durationSource });
+    const result = entry === 'probeMedia' ? await probeMedia(input) : await prepareMediaProbe(input);
+    try { expect(result.durationMs).toBe(2000); }
+    finally { if ('release' in result && typeof result.release === 'function') await result.release(); }
+    expect(await workspaces()).toEqual([]);
+  });
+
+  it('rejects an unknown duration source policy before reading media', async () => {
+    const pull = vi.fn();
+    const input = { ...request({ kind: 'stream', stream: new ReadableStream({ pull }, { highWaterMark: 0 }) }), durationSource: 'unknown' };
+    const run = entry === 'probeMedia' ? probeMedia : prepareMediaProbe;
+    await expect(run(input as unknown as ProbeMediaRequest)).rejects.toMatchObject({ code: 'config_invalid' });
+    expect(pull).not.toHaveBeenCalled();
+    expect(await workspaces()).toEqual([]);
   });
 });
 

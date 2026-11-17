@@ -42,6 +42,7 @@ export type ProbeMediaRequest = Omit<MediaRuntimeInput, 'ffmpegPath'> & Readonly
   probeTimeoutMs?: number;
   inputArgs?: readonly string[];
   maxOutputBytes?: number;
+  durationSource?: 'first-valid' | 'container-or-first-video';
   source: Source;
 }>;
 

@@ -18,7 +18,7 @@ export async function probeFile(
   ffprobePath: string,
   filePath: string,
   budget: Budget,
-  options: Pick<ProbeMediaRequest, 'probeTimeoutMs' | 'inputArgs' | 'maxOutputBytes'> = {},
+  options: Pick<ProbeMediaRequest, 'probeTimeoutMs' | 'inputArgs' | 'maxOutputBytes' | 'durationSource'> = {},
 ): Promise<MediaInfo> {
   const { stdout } = await runCommand(
     ffprobePath,
@@ -28,10 +28,13 @@ export async function probeFile(
       ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
     },
   );
-  return parseProbe(stdout);
+  return parseProbe(stdout, options.durationSource);
 }
 
-export function parseProbe(stdout: Buffer): MediaInfo {
+export function parseProbe(
+  stdout: Buffer,
+  durationSource: NonNullable<ProbeMediaRequest['durationSource']> = 'first-valid',
+): MediaInfo {
   const text = stdout.toString('utf8').trim();
   const start = text.indexOf('{');
   if (start < 0) throw new StorageError('unavailable', 'ffprobe did not return json');
@@ -49,6 +52,7 @@ export function parseProbe(stdout: Buffer): MediaInfo {
   const streams = Array.isArray(root.streams) ? root.streams : [];
   let video: VideoStreamInfo | null = null;
   let audio: AudioStreamInfo | null = null;
+  let firstVideoDuration: unknown;
   const durations: number[] = [];
   const formatDuration = durationMs(format?.duration);
   if (formatDuration !== undefined) durations.push(formatDuration);
@@ -58,6 +62,7 @@ export function parseProbe(stdout: Buffer): MediaInfo {
     const streamDuration = durationMs(stream.duration);
     if (streamDuration !== undefined) durations.push(streamDuration);
     if (stream.codec_type === 'video' && video === null) {
+      firstVideoDuration = stream.duration;
       const codec = typeof stream.codec_name === 'string' ? stream.codec_name : '';
       const width = typeof stream.width === 'number' ? stream.width : 0;
       const height = typeof stream.height === 'number' ? stream.height : 0;
@@ -79,7 +84,9 @@ export function parseProbe(stdout: Buffer): MediaInfo {
   }
   return {
     formatName,
-    durationMs: durations[0] ?? 0,
+    durationMs: durationSource === 'container-or-first-video'
+      ? durationMs(Number(format?.duration ?? firstVideoDuration)) ?? 0
+      : durations[0] ?? 0,
     video,
     audio,
   };

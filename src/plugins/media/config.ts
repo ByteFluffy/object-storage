@@ -23,6 +23,8 @@ export function readProbeRuntime(input: ProbeMediaRequest) {
   const record = asRecord(input, 'request');
   const probeTimeoutMs = optionalNumber(record.probeTimeoutMs, 'probeTimeoutMs', { minExclusive: 0 });
   const maxOutputBytes = optionalNumber(record.maxOutputBytes, 'maxOutputBytes', { minExclusive: 0, integer: true });
+  const durationSource = record.durationSource === undefined ? undefined
+    : readChoice(record.durationSource, ['first-valid', 'container-or-first-video'] as const, 'durationSource');
   const inputArgs = record.inputArgs;
   if (inputArgs !== undefined && (!Array.isArray(inputArgs) || !inputArgs.every(value => typeof value === 'string'))) {
     throw new StorageError('config_invalid', 'inputArgs is invalid');
@@ -31,6 +33,7 @@ export function readProbeRuntime(input: ProbeMediaRequest) {
     ...readRuntimeFields(record),
     ...(probeTimeoutMs === undefined ? {} : { probeTimeoutMs }),
     ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+    ...(durationSource === undefined ? {} : { durationSource }),
     ...(inputArgs === undefined ? {} : { inputArgs: inputArgs as readonly string[] }),
   };
 }

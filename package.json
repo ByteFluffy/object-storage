@@ -1,6 +1,6 @@
 {
   "name": "@byte_fluffy/object-storage",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Shared object storage operations for server upload, browser direct upload, and explicit finalize.",
   "repository": {
     "type": "git",

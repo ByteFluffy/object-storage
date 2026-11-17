@@ -337,6 +337,12 @@ found on PATH are supported. Video width and height remain coded dimensions;
 optional `rotation` reports display rotation in degrees. `durationMs` retains
 fractional milliseconds for applications that need finer units.
 
+Both probe functions accept `durationSource`. The default, `'first-valid'`, keeps
+the first valid non-negative duration in container-then-stream order.
+`'container-or-first-video'` uses `Number(container.duration ?? firstVideo.duration)`;
+an invalid or non-positive result is reported as zero without borrowing another
+track's duration. A present but invalid container duration does not fall back.
+
 ## 调用示例
 
 内存驱动上传并封存，见 [examples/server-archive.ts](examples/server-archive.ts)。
