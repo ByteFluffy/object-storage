@@ -266,8 +266,32 @@ actual `httpStatus` and available response metadata. It supplies no content
 checksum. The default checksum mode still reads and verifies content; HEAD is
 not checksum evidence. Availability cannot be combined with expectedChecksum,
 and unsigned URLs cannot contain a query string. Signed HEAD remains bound to
-a HEAD signature. Hosts retain retry scheduling through the existing event
-interface; the package adds no polling loop.
+a HEAD signature.
+
+Use `waitForUrl` when the package should own repeated availability checks:
+
+```ts
+const result = await waitForUrl({
+  url: 'https://media.example/video/generated.mp4',
+  method: 'HEAD',
+  signatureMethod: 'unsigned',
+  verification: 'availability',
+  intervalMs: 500,
+  deadlineMs: 30_000,
+  fetch,
+  signal,
+});
+```
+
+The first check starts immediately. Later checks start `intervalMs` after the
+previous check finishes, without overlapping requests. The package retries
+404, 408, 429, 5xx and transport unavailability; other HTTP responses, redirects
+and content mismatches stop the wait. Cancellation and the total deadline bound
+both pending requests and interval waits. Transports must honor the supplied
+signal to physically interrupt network I/O. Timer durations must be integer
+milliseconds within the platform timer range; intervals must be positive and
+deadlines may be zero. `followReplica` remains available for hosts that supply
+queue or bucket-notification events themselves.
 
 ## 调用示例
 

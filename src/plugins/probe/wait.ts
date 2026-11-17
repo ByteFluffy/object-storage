@@ -20,6 +20,10 @@ export function decideReplica(
 ): ReplicaDecision {
   if (result.status === 'passed') return { type: 'settled', result };
   if (STOP.has(result.status) || result.status === 'timed_out') return { type: 'stopped', result };
+  const status = result.httpStatus;
+  if (status !== undefined && status !== 404 && status !== 408 && status !== 429 && !(status >= 500 && status < 600)) {
+    return { type: 'stopped', result };
+  }
 
   const nextAt = timing.now + timing.intervalMs;
   const pending: ProbeResult = { ...result, nextCheckAt: new Date(nextAt).toISOString() };
