@@ -1,6 +1,6 @@
 import { StorageError } from '../../core/errors.js';
 import { remainingMs, runCommand, type Budget } from './command.js';
-import type { AudioStreamInfo, MediaInfo, VideoStreamInfo } from './types.js';
+import type { AudioStreamInfo, MediaInfo, ProbeMediaRequest, VideoStreamInfo } from './types.js';
 
 export type MediaExpectation = Readonly<{
   container: string;
@@ -14,11 +14,19 @@ export type MediaExpectation = Readonly<{
   sampleRate?: number;
 }>;
 
-export async function probeFile(ffprobePath: string, filePath: string, budget: Budget): Promise<MediaInfo> {
+export async function probeFile(
+  ffprobePath: string,
+  filePath: string,
+  budget: Budget,
+  options: Pick<ProbeMediaRequest, 'probeTimeoutMs' | 'inputArgs' | 'maxOutputBytes'> = {},
+): Promise<MediaInfo> {
   const { stdout } = await runCommand(
     ffprobePath,
-    ['-hide_banner', '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filePath],
-    { timeoutMs: remainingMs(budget), signal: budget.signal },
+    ['-hide_banner', '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', ...(options.inputArgs ?? []), filePath],
+    {
+      timeoutMs: Math.min(remainingMs(budget), options.probeTimeoutMs ?? Infinity), signal: budget.signal,
+      ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
+    },
   );
   return parseProbe(stdout);
 }
@@ -53,10 +61,11 @@ export function parseProbe(stdout: Buffer): MediaInfo {
       const codec = typeof stream.codec_name === 'string' ? stream.codec_name : '';
       const width = typeof stream.width === 'number' ? stream.width : 0;
       const height = typeof stream.height === 'number' ? stream.height : 0;
-      if (codec.length === 0 || width <= 0 || height <= 0) {
+      if (codec.length === 0 || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
         throw new StorageError('unavailable', 'ffprobe video stream is incomplete');
       }
-      video = { codec, width, height, fps: frameRate(stream) };
+      const rotation = readRotation(stream);
+      video = { codec, width, height, fps: frameRate(stream), ...(rotation === undefined || rotation === 0 ? {} : { rotation }) };
     }
     if (stream.codec_type === 'audio' && audio === null) {
       const codec = typeof stream.codec_name === 'string' ? stream.codec_name : '';
@@ -164,7 +173,19 @@ function durationMs(value: unknown): number | undefined {
   if (typeof value !== 'string' && typeof value !== 'number') return undefined;
   const seconds = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return Math.round(seconds * 1000);
+  const milliseconds = seconds * 1000;
+  return Number.isFinite(milliseconds) ? milliseconds : undefined;
+}
+
+function readRotation(stream: Record<string, unknown>): number | undefined {
+  const sideData = Array.isArray(stream.side_data_list) ? stream.side_data_list : [];
+  for (const entry of sideData) {
+    const value = asRecord(entry)?.rotation;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  const tag = asRecord(stream.tags)?.rotate;
+  const value = typeof tag === 'string' && tag.trim().length > 0 ? Number(tag) : tag;
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function frameRate(stream: Record<string, unknown>): number {

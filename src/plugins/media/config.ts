@@ -4,6 +4,7 @@ import type {
   AudioContainer,
   AudioSettings,
   MediaRuntime,
+  ProbeMediaRequest,
   TrimPrecision,
   VideoContainer,
   VideoSettings,
@@ -15,6 +16,26 @@ const AUDIO_CONTAINERS: readonly AudioContainer[] = ['mp3', 'm4a', 'wav'];
 export function readRuntime(input: object): MediaRuntime {
   const record = asRecord(input, 'request');
   const ffmpegPath = requireString(record.ffmpegPath, 'ffmpegPath');
+  return { ffmpegPath, ...readRuntimeFields(record) };
+}
+
+export function readProbeRuntime(input: ProbeMediaRequest) {
+  const record = asRecord(input, 'request');
+  const probeTimeoutMs = optionalNumber(record.probeTimeoutMs, 'probeTimeoutMs', { minExclusive: 0 });
+  const maxOutputBytes = optionalNumber(record.maxOutputBytes, 'maxOutputBytes', { minExclusive: 0, integer: true });
+  const inputArgs = record.inputArgs;
+  if (inputArgs !== undefined && (!Array.isArray(inputArgs) || !inputArgs.every(value => typeof value === 'string'))) {
+    throw new StorageError('config_invalid', 'inputArgs is invalid');
+  }
+  return {
+    ...readRuntimeFields(record),
+    ...(probeTimeoutMs === undefined ? {} : { probeTimeoutMs }),
+    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+    ...(inputArgs === undefined ? {} : { inputArgs: inputArgs as readonly string[] }),
+  };
+}
+
+function readRuntimeFields(record: Record<string, unknown>): Omit<MediaRuntime, 'ffmpegPath'> {
   const ffprobePath = requireString(record.ffprobePath, 'ffprobePath');
   const workspaceDirectory = requireString(record.workspaceDirectory, 'workspaceDirectory');
   if (record.deadlineMs === undefined) throw new StorageError('config_missing', 'deadlineMs is required');
@@ -23,7 +44,6 @@ export function readRuntime(input: object): MediaRuntime {
   if (!(record.signal instanceof AbortSignal)) throw new StorageError('config_invalid', 'signal is invalid');
   const maxInputBytes = optionalNumber(record.maxInputBytes, 'maxInputBytes', { minExclusive: 0, integer: true });
   return {
-    ffmpegPath,
     ffprobePath,
     workspaceDirectory,
     deadlineMs,

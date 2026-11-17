@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { probeMedia, transcodeVideo } from '../../src/plugins/media/index.js';
+import { prepareMediaProbe, probeMedia, transcodeVideo } from '../../src/plugins/media/index.js';
 
 const FFMPEG = '/opt/homebrew/bin/ffmpeg';
 const FFPROBE = '/opt/homebrew/bin/ffprobe';
@@ -44,6 +44,43 @@ describe('media process integration', () => {
       value: createHash('sha256').update(await readFile(clip)).digest('hex'),
     });
     expect((await stat(clip)).size).toBe(before.size);
+  }, 30_000);
+
+  it('prepares a real video stream once and keeps its original bytes readable until release', async () => {
+    const original = await readFile(clip);
+    let pulls = 0;
+    const stream = new ReadableStream<Uint8Array>({ pull(controller) {
+      pulls += 1; controller.enqueue(original); controller.close();
+    } }, { highWaterMark: 0 });
+    const prepared = await prepareMediaProbe({
+      source: { kind: 'stream', stream, declaredByteLength: original.byteLength },
+      ffprobePath: FFPROBE, workspaceDirectory: dir,
+      deadlineMs: 20_000, signal: new AbortController().signal,
+    });
+    try {
+      expect(pulls).toBe(1);
+      expect(stream.locked).toBe(false);
+      expect(prepared.video).toMatchObject({ codec: 'h264', width: 160, height: 120 });
+      expect(prepared.audio).toMatchObject({ codec: 'aac', sampleRate: 44100 });
+      expect(prepared.byteLength).toBe(original.byteLength);
+      expect(prepared.inputChecksum).toEqual({ algorithm: 'sha256', value: createHash('sha256').update(original).digest('hex') });
+      expect(Buffer.from(await new Response(prepared.body).arrayBuffer())).toEqual(original);
+      expect((await stat(prepared.filePath)).size).toBe(original.byteLength);
+    } finally { await prepared.release(); }
+    await expect(stat(prepared.filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(clip)).toEqual(original);
+  }, 30_000);
+
+  it('reports a real display rotation without swapping coded dimensions or deleting the source', async () => {
+    const rotated = join(dir, 'rotated.mp4');
+    await runTool(FFMPEG, ['-v', 'error', '-display_rotation:v:0', '90', '-i', clip, '-c', 'copy', '-y', rotated]);
+    const result = await probeMedia({
+      source: { kind: 'file', path: rotated }, ffmpegPath: FFMPEG, ffprobePath: FFPROBE,
+      workspaceDirectory: dir, deadlineMs: 20_000, signal: new AbortController().signal,
+    });
+    expect(result.video).toMatchObject({ width: 160, height: 120 });
+    expect(Math.abs(result.video?.rotation ?? 0)).toBe(90);
+    expect((await stat(rotated)).isFile()).toBe(true);
   }, 30_000);
 
   it('kills a real ffmpeg when the deadline is exceeded', async () => {

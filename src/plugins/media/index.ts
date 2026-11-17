@@ -1,6 +1,10 @@
+import { createReadStream, type ReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import { StorageError } from '../../core/errors.js';
+import { openBoundedRead } from '../../io/read.js';
+import { createWorkspace, type Workspace } from '../../io/workspace.js';
 import type { ProcessingResult } from '../../core/plugin.js';
-import { outputCodec, remainingMs, runCommand, seconds } from './command.js';
+import { assertExecutable, createBudget, outputCodec, remainingMs, runCommand, seconds } from './command.js';
 import {
   assertAudioChoice,
   assertDimensions,
@@ -14,6 +18,7 @@ import {
   readOptionalDimension,
   readOptionalVideo,
   readPrecision,
+  readProbeRuntime,
   readRuntime,
   readSingleSource,
   readTolerance,
@@ -27,6 +32,7 @@ import {
   discard,
   fileSize,
   materialize,
+  materializeProbe,
   prepare,
   publish,
   readProduced,
@@ -42,6 +48,7 @@ import type {
   ExtractFrameRequest,
   MediaInfo,
   MediaProbe,
+  PreparedMediaProbe,
   ProbeMediaRequest,
   TranscodeAudioRequest,
   TranscodeVideoRequest,
@@ -56,6 +63,7 @@ export type {
   ConcatMediaRequest,
   ExtractFrameRequest,
   MediaProbe,
+  PreparedMediaProbe,
   ProbeMediaRequest,
   TranscodeAudioRequest,
   TranscodeVideoRequest,
@@ -65,16 +73,66 @@ export type {
 } from './types.js';
 
 export async function probeMedia(input: ProbeMediaRequest): Promise<MediaProbe> {
-  const runtime = readRuntime(input);
+  const prepared = await prepareMediaProbe(input);
+  try {
+    const { filePath, body, release, ...probe } = prepared;
+    return probe;
+  } finally {
+    await prepared.release();
+  }
+}
+
+export async function prepareMediaProbe(input: ProbeMediaRequest): Promise<PreparedMediaProbe> {
+  const runtime = readProbeRuntime(input);
   const source = readSingleSource(input.source);
   if (runtime.signal.aborted) throw new StorageError('cancelled', 'operation cancelled');
-  const prepared = await prepare(runtime, []);
+  const deadline = new AbortController();
+  const signal = AbortSignal.any([runtime.signal, deadline.signal]);
+  const budget = createBudget(runtime.deadlineMs, signal);
+  const timeout = setTimeout(() => deadline.abort(new StorageError('cancelled', 'deadline exceeded')), runtime.deadlineMs);
+  const lease = new AbortController();
+  let workspace: Workspace | undefined;
+  let file: ReadStream | undefined;
+  let fileClosed = Promise.resolve();
+  let releasing: Promise<void> | undefined;
+  const release = () => releasing ??= (async () => {
+    lease.abort();
+    file?.destroy();
+    await fileClosed;
+    await workspace?.release();
+  })();
   try {
-    const material = await materialize(prepared, source, 'input.bin');
-    const info = await probeFile(runtime.ffprobePath, material.path, prepared.budget);
-    return { ...info, byteLength: material.byteLength, inputChecksum: checksumOf([material.bytes]) };
+    await assertExecutable(runtime.ffprobePath);
+    signal.throwIfAborted();
+    workspace = await createWorkspace(runtime.workspaceDirectory);
+    signal.throwIfAborted();
+    const material = await materializeProbe(workspace, source, {
+      signal, ...(runtime.maxInputBytes === undefined ? {} : { maxInputBytes: runtime.maxInputBytes }),
+    });
+    const info = await probeFile(runtime.ffprobePath, material.path, budget, runtime);
+    remainingMs(budget);
+    file = createReadStream(material.path);
+    fileClosed = new Promise<void>(resolve => file!.once('close', resolve));
+    const body = openBoundedRead({
+      body: Readable.toWeb(file, { strategy: { highWaterMark: 0 } }) as ReadableStream<Uint8Array>, byteLength: material.byteLength,
+    }, { signal: AbortSignal.any([runtime.signal, lease.signal]) }).body;
+    remainingMs(budget);
+    return { ...info, byteLength: material.byteLength, inputChecksum: material.inputChecksum,
+      filePath: material.path, body, release };
+  } catch (error) {
+    if (source.kind === 'stream' && !source.stream.locked) void source.stream.cancel(error).catch(() => {});
+    try {
+      await release();
+    } catch {
+      // Cleanup must not replace the preparation failure.
+    }
+    if (signal.aborted) {
+      if (signal.reason instanceof StorageError) throw signal.reason;
+      throw new StorageError('cancelled', 'operation cancelled');
+    }
+    throw error;
   } finally {
-    await discard(prepared);
+    clearTimeout(timeout);
   }
 }
 

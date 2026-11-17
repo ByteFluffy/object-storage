@@ -37,7 +37,11 @@ export type MediaRuntimeInput = Readonly<{
   maxInputBytes?: number;
 }>;
 
-export type ProbeMediaRequest = MediaRuntimeInput & Readonly<{
+export type ProbeMediaRequest = Omit<MediaRuntimeInput, 'ffmpegPath'> & Readonly<{
+  ffmpegPath?: string;
+  probeTimeoutMs?: number;
+  inputArgs?: readonly string[];
+  maxOutputBytes?: number;
   source: Source;
 }>;
 
@@ -46,6 +50,7 @@ export type VideoStreamInfo = Readonly<{
   width: number;
   height: number;
   fps: number;
+  rotation?: number;
 }>;
 
 export type AudioStreamInfo = Readonly<{
@@ -64,6 +69,12 @@ export type MediaInfo = Readonly<{
 export type MediaProbe = MediaInfo & Readonly<{
   byteLength: number;
   inputChecksum: Checksum;
+}>;
+
+export type PreparedMediaProbe = MediaProbe & Readonly<{
+  filePath: string;
+  body: ReadableStream<Uint8Array>;
+  release(): Promise<void>;
 }>;
 
 export type TranscodeVideoRequest = MediaRuntimeInput & Readonly<{

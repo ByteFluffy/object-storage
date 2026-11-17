@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
+import { delimiter, join } from 'node:path';
 import { StorageError } from '../../core/errors.js';
 
 const STATIC_CODEC: Readonly<Record<string, string>> = {
@@ -42,11 +43,18 @@ export function remainingMs(budget: Budget): number {
 }
 
 export async function assertExecutable(filePath: string): Promise<void> {
-  try {
-    await access(filePath, constants.X_OK);
-  } catch {
-    throw new StorageError('capability_unsupported', `media tool is not executable: ${filePath}`);
+  const candidates = filePath.includes('/') || filePath.includes('\\')
+    ? [filePath]
+    : (process.env.PATH ?? '').split(delimiter).map(directory => join(directory, filePath));
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.X_OK);
+      return;
+    } catch {
+      // An unavailable PATH entry does not rule out later entries.
+    }
   }
+  throw new StorageError('capability_unsupported', `media tool is not executable: ${filePath}`);
 }
 
 export function parseEncoders(text: string): Map<string, string | null> {
@@ -93,7 +101,7 @@ export function seconds(ms: number): string {
 export function runCommand(
   command: string,
   args: readonly string[],
-  options: { timeoutMs: number; signal: AbortSignal },
+  options: { timeoutMs: number; signal: AbortSignal; maxOutputBytes?: number },
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     if (options.signal.aborted) {
@@ -102,6 +110,10 @@ export function runCommand(
     }
     if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
       reject(new StorageError('cancelled', 'deadline exceeded'));
+      return;
+    }
+    if (options.maxOutputBytes !== undefined && (!Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes <= 0)) {
+      reject(new StorageError('config_invalid', 'maxOutputBytes must be a positive safe integer'));
       return;
     }
 
@@ -119,6 +131,8 @@ export function runCommand(
 
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
     let reason: StorageError | null = null;
 
@@ -144,10 +158,22 @@ export function runCommand(
 
     options.signal.addEventListener('abort', onAbort, { once: true });
     child.stdout?.on('data', (chunk: Buffer | string) => {
-      stdout.push(Buffer.from(chunk));
+      if (reason) return;
+      const data = Buffer.from(chunk);
+      stdoutBytes += data.byteLength;
+      if (options.maxOutputBytes !== undefined && stdoutBytes > options.maxOutputBytes) {
+        reason = new StorageError('unavailable', 'media tool stdout exceeds maxOutputBytes');
+        killChild();
+      } else stdout.push(data);
     });
     child.stderr?.on('data', (chunk: Buffer | string) => {
-      stderr.push(Buffer.from(chunk));
+      if (reason) return;
+      const data = Buffer.from(chunk);
+      stderrBytes += data.byteLength;
+      if (options.maxOutputBytes !== undefined && stderrBytes > options.maxOutputBytes) {
+        reason = new StorageError('unavailable', 'media tool stderr exceeds maxOutputBytes');
+        killChild();
+      } else stderr.push(data);
     });
     child.once('error', (error: NodeJS.ErrnoException) => {
       if (settled) return;

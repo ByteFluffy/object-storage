@@ -2,7 +2,7 @@
 
 三个应用共用的对象存储包。上传、处理、探测和交付判断是四件独立的事：处理成功不表示已经上传，上传成功不表示链接已验证，判断够用也不表示已经处理。
 
-当前版本 `0.1.3`，个人 npm scope 为 `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
+当前版本 `0.1.5`，个人 npm scope 为 `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
 
 ## 架构
 
@@ -35,7 +35,7 @@ flowchart TB
   server --> getPlan[GET 计划]
 ```
 
-副本是否就绪不在包里长轮询。宿主发出 `check` 或 `timeout`，`followReplica` 做一次判断后就可以退出。
+`waitForUrl` 可按宿主传入的间隔、期限和取消信号等待 URL 可用。`followReplica` 继续支持宿主发出 `check` 或 `timeout` 事件来推进判断。
 
 ```mermaid
 sequenceDiagram
@@ -111,7 +111,7 @@ docs/architecture.md
 - 浏览器执行已签名的 PUT。服务端签发 PUT 和 GET。TOS 预签名没有 HEAD，要 HEAD 时直接拒绝。
 - 分片计划按调用方的分片大小计算，不填默认分片。
 - 探测桶、对象和 URL。同大小不同内容不算通过。GET 签名不能拿去发 HEAD。
-- 副本等待由宿主事件推进，包内不睡眠。
+- URL 可用性等待由 `waitForUrl` 执行；宿主事件驱动的副本判断使用 `followReplica`。
 - 清理只删除登记对象，核对 `storageId`，一次失败继续处理后面的项，只终止登记的分片。
 - 图片转换、缩放、目标体积。透明转 JPEG 和动画策略由调用方决定。
 - 音视频转码、压缩、提取、裁剪、拼接。路径、码率和分辨率由调用方传入，不用截断凑体积。
@@ -292,6 +292,50 @@ signal to physically interrupt network I/O. Timer durations must be integer
 milliseconds within the platform timer range; intervals must be positive and
 deadlines may be zero. `followReplica` remains available for hosts that supply
 queue or bucket-notification events themselves.
+
+### Streaming media probes
+
+`probeMedia` returns media facts and releases its temporary input automatically.
+`prepareMediaProbe` keeps a seekable snapshot and a readable stream of the original
+bytes for a following operation. Both use the same probe implementation.
+
+```ts
+import { prepareMediaProbe } from '@byte_fluffy/object-storage/plugins/media';
+
+const prepared = await prepareMediaProbe({
+  source: { kind: 'stream', stream: response.body },
+  ffprobePath,
+  workspaceDirectory,
+  deadlineMs,
+  signal,
+});
+try {
+  await consume(prepared.body, prepared);
+} finally {
+  await prepared.release();
+}
+```
+
+Bytes, files and streams are copied into an owned workspace snapshot using bounded
+streaming and incremental SHA-256. A file input is never removed or modified. Disk
+usage grows with the input size. `release` is idempotent and closes the returned
+stream before removing the snapshot.
+
+`deadlineMs` covers snapshot creation and probing. An optional `probeTimeoutMs`
+limits only the ffprobe command; the smaller remaining budget wins. Once the call
+returns, the preparation timer is cleared and the caller owns the stream until
+`release`. Caller cancellation still applies to the returned stream.
+
+Input budgets (`maxInputBytes`), command-output budgets (`maxOutputBytes`, applied
+separately to stdout and stderr), and ffprobe input options (`inputArgs`) are
+caller configuration. No application protocol policy or fixed input-size limit
+is imposed. A declared stream length of zero means exactly zero bytes; omit
+`declaredByteLength` when the length is unknown.
+
+Only ffprobe is required for probing. Explicit executable paths and bare commands
+found on PATH are supported. Video width and height remain coded dimensions;
+optional `rotation` reports display rotation in degrees. `durationMs` retains
+fractional milliseconds for applications that need finer units.
 
 ## 调用示例
 

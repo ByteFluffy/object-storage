@@ -1,10 +1,15 @@
+import { createHash } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import type { Checksum, Source } from '../../core/contracts.js';
 import { StorageError } from '../../core/errors.js';
 import type { ProcessingResult } from '../../core/plugin.js';
 import { sha256Checksum } from '../../io/hash.js';
 import { readSource } from '../../io/sources.js';
+import { openBoundedRead } from '../../io/read.js';
 import { createWorkspace, type Workspace } from '../../io/workspace.js';
 import {
   assertEncoders,
@@ -57,6 +62,33 @@ export async function materialize(prepared: Prepared, source: Source, name: stri
   }
   const stored = await prepared.workspace.writeArtifact(name, body.data);
   return { path: stored.path, bytes: body.data, byteLength: body.byteLength };
+}
+
+/** Snapshot once so metadata, checksums and the returned body describe the same content. */
+export async function materializeProbe(
+  workspace: Workspace,
+  source: Source,
+  options: Readonly<{ signal: AbortSignal; maxInputBytes?: number }>,
+): Promise<{ path: string; byteLength: number; inputChecksum: Checksum }> {
+  const declaredByteLength = source.kind === 'file' ? (await stat(source.path)).size
+    : source.kind === 'bytes' ? source.data.byteLength : source.declaredByteLength;
+  const body = source.kind === 'stream' ? source.stream
+    : source.kind === 'file' ? Readable.toWeb(createReadStream(source.path), { strategy: { highWaterMark: 0 } }) as ReadableStream<Uint8Array>
+    : new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(source.data); controller.close(); } });
+  const bounded = openBoundedRead({ body, ...(declaredByteLength === undefined ? {} : { byteLength: declaredByteLength }) }, {
+    signal: options.signal, ...(options.maxInputBytes === undefined ? {} : { maxBytes: options.maxInputBytes }),
+  });
+  const digest = createHash('sha256');
+  let byteLength = 0;
+  const measured = new Transform({ transform(chunk: Buffer, _encoding, next) {
+    byteLength += chunk.byteLength;
+    digest.update(chunk);
+    next(null, chunk);
+  } });
+  const path = workspaceFile(workspace, 'input.bin');
+  await pipeline(Readable.fromWeb(bounded.body as never), measured, createWriteStream(path), { signal: options.signal });
+  if (byteLength === 0) throw new StorageError('unavailable', 'media input is empty');
+  return { path, byteLength, inputChecksum: { algorithm: 'sha256', value: digest.digest('hex') } };
 }
 
 export function checksumOf(parts: readonly Uint8Array[]): Checksum {
