@@ -1,8 +1,8 @@
-# @byte_fluffy/object-storage
+# @starrank-soft/object-storage
 
 三个应用共用的对象存储包。上传、处理、探测和交付判断是四件独立的事：处理成功不表示已经上传，上传成功不表示链接已验证，判断够用也不表示已经处理。
 
-当前版本 `0.1.7`，个人 npm scope 为 `@byte_fluffy`。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
+通过 `starrank-soft` 的 GitHub Packages 发布。真实桶密钥只从运行环境读取，不放进仓库。更完整的时序图见 [docs/architecture.md](docs/architecture.md)。
 
 ## 架构
 
@@ -90,17 +90,17 @@ docs/architecture.md
 
 | 导入 | 用途 |
 | --- | --- |
-| `@byte_fluffy/object-storage` | 上传、封存、读取、临时产物 |
-| `@byte_fluffy/object-storage/browser` | 浏览器执行 PUT |
-| `@byte_fluffy/object-storage/server` | PUT、GET、分片计划 |
-| `@byte_fluffy/object-storage/delivery` | `assessDelivery` |
-| `@byte_fluffy/object-storage/drivers/memory` | 内存驱动 |
-| `@byte_fluffy/object-storage/drivers/tos` | TOS 驱动 |
-| `@byte_fluffy/object-storage/drivers/s3` | S3 驱动 |
-| `@byte_fluffy/object-storage/plugins/probe` | 探测 |
-| `@byte_fluffy/object-storage/plugins/cleanup` | 清理 |
-| `@byte_fluffy/object-storage/plugins/image` | 图片 |
-| `@byte_fluffy/object-storage/plugins/media` | 音视频 |
+| `@starrank-soft/object-storage` | 上传、封存、读取、临时产物 |
+| `@starrank-soft/object-storage/browser` | 浏览器执行 PUT |
+| `@starrank-soft/object-storage/server` | PUT、GET、分片计划 |
+| `@starrank-soft/object-storage/delivery` | `assessDelivery` |
+| `@starrank-soft/object-storage/drivers/memory` | 内存驱动 |
+| `@starrank-soft/object-storage/drivers/tos` | TOS 驱动 |
+| `@starrank-soft/object-storage/drivers/s3` | S3 驱动 |
+| `@starrank-soft/object-storage/plugins/probe` | 探测 |
+| `@starrank-soft/object-storage/plugins/cleanup` | 清理 |
+| `@starrank-soft/object-storage/plugins/image` | 图片 |
+| `@starrank-soft/object-storage/plugins/media` | 音视频 |
 
 `src/index.ts` 不导入 Sharp、FFmpeg 或云 SDK。浏览器入口不包含 Node 内置模块和云凭证。
 
@@ -119,8 +119,11 @@ docs/architecture.md
 
 ## 安装
 
+先用有包读取权限的 GitHub classic PAT 登录，再安装依赖。
+
 ```sh
-npm install @byte_fluffy/object-storage
+npm login --scope=@starrank-soft --registry=https://npm.pkg.github.com --auth-type=legacy
+npm install @starrank-soft/object-storage
 ```
 
 S3、TOS 按需安装对应的可选 peer dependency：`@aws-sdk/client-s3` 与 `@aws-sdk/s3-request-presigner`、`@volcengine/tos-sdk`。图片插件的 Sharp 依赖由本包安装和维护，调用方无需直接安装。FFmpeg 由宿主提供。
@@ -130,7 +133,7 @@ S3、TOS 按需安装对应的可选 peer dependency：`@aws-sdk/client-s3` 与 
 `fingerprintSource` calculates a source's SHA-256 and actual byte length without uploading or retaining the complete source in memory. It accepts the existing `Source` forms: bytes, a local file, or a readable stream.
 
 ```ts
-import { fingerprintSource } from '@byte_fluffy/object-storage';
+import { fingerprintSource } from '@starrank-soft/object-storage';
 
 const first = await fingerprintSource({ kind: 'file', path: '/media/first.png' });
 const second = await fingerprintSource({ kind: 'file', path: '/media/renamed.png' });
@@ -142,13 +145,13 @@ This compares exact file content: paths, names and filesystem timestamps do not 
 
 ### Bundled server applications
 
-Image processing stays behind `@byte_fluffy/object-storage/plugins/image`. Metadata reports display dimensions after EXIF orientation, and conversion applies that orientation before removing metadata. Originals are never modified.
+Image processing stays behind `@starrank-soft/object-storage/plugins/image`. Metadata reports display dimensions after EXIF orientation, and conversion applies that orientation before removing metadata. Originals are never modified.
 
 For esbuild applications that deploy a standalone output directory, use the package's build plugin:
 
 ```js
 import { build } from 'esbuild';
-import { objectStorageImagePlugin } from '@byte_fluffy/object-storage/build/esbuild';
+import { objectStorageImagePlugin } from '@starrank-soft/object-storage/build/esbuild';
 
 await build({
   entryPoints: ['src/main.ts'],
@@ -217,8 +220,8 @@ storage configuration; applications resolve their deployment and market before
 calling the package.
 
 ```ts
-import { createS3Storage } from '@byte_fluffy/object-storage/drivers/s3';
-import { createSingleGetPlan, createMultipartAbortPlan } from '@byte_fluffy/object-storage/server';
+import { createS3Storage } from '@starrank-soft/object-storage/drivers/s3';
+import { createSingleGetPlan, createMultipartAbortPlan } from '@starrank-soft/object-storage/server';
 
 const objects = createS3Storage({
   storageId: 'media',
@@ -315,7 +318,7 @@ queue or bucket-notification events themselves.
 bytes for a following operation. Both use the same probe implementation.
 
 ```ts
-import { prepareMediaProbe } from '@byte_fluffy/object-storage/plugins/media';
+import { prepareMediaProbe } from '@starrank-soft/object-storage/plugins/media';
 
 const prepared = await prepareMediaProbe({
   source: { kind: 'stream', stream: response.body },
@@ -363,8 +366,8 @@ track's duration. A present but invalid container duration does not fall back.
 内存驱动上传并封存，见 [examples/server-archive.ts](examples/server-archive.ts)。
 
 ```ts
-import { createStorage } from '@byte_fluffy/object-storage';
-import { createMemoryDriver } from '@byte_fluffy/object-storage/drivers/memory';
+import { createStorage } from '@starrank-soft/object-storage';
+import { createMemoryDriver } from '@starrank-soft/object-storage/drivers/memory';
 
 const storage = createStorage({
   drivers: [createMemoryDriver({ storageId: 'local' })],
@@ -390,8 +393,8 @@ const sealed = await storage.finalize({
 交付判断和 GET 计划的调用形状见 [examples/calls.ts](examples/calls.ts)。判断结果可能是 `usable`、`adapt`、`insufficient_evidence` 或 `unsupported`。GET 计划的 `url` 含签名，不要写进日志。
 
 ```ts
-import { assessDelivery } from '@byte_fluffy/object-storage/delivery';
-import { createSingleGetPlan } from '@byte_fluffy/object-storage/server';
+import { assessDelivery } from '@starrank-soft/object-storage/delivery';
+import { createSingleGetPlan } from '@starrank-soft/object-storage/server';
 
 const fit = assessDelivery(
   { mediaType: 'image/png', byteLength: 120_000, width: 1600, height: 900 },
@@ -418,7 +421,7 @@ npm run build
 npm run test:package
 ```
 
-`npm run test:integration` 在没有 `OBJECT_STORAGE_LIVE_TEST=1` 时失败退出。配置了 `OBJECT_STORAGE_S3_BUCKET`、`OBJECT_STORAGE_S3_REGION`、`OBJECT_STORAGE_S3_ENDPOINT`、`OBJECT_STORAGE_S3_ACCESS_KEY_ID` 和 `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` 之后，它只对 `@byte_fluffy/object-storage-smoke/` 前缀做一次上传、签名、检查和删除。
+`npm run test:integration` 在没有 `OBJECT_STORAGE_LIVE_TEST=1` 时失败退出。配置了 `OBJECT_STORAGE_S3_BUCKET`、`OBJECT_STORAGE_S3_REGION`、`OBJECT_STORAGE_S3_ENDPOINT`、`OBJECT_STORAGE_S3_ACCESS_KEY_ID` 和 `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` 之后，它只对 `@starrank-soft/object-storage-smoke/` 前缀做一次上传、签名、检查和删除。
 
 ## 不做的事
 

@@ -1,14 +1,13 @@
 {
-  "name": "@byte_fluffy/object-storage",
+  "name": "@starrank-soft/object-storage",
   "version": "0.1.7",
   "description": "Shared object storage operations for server upload, browser direct upload, and explicit finalize.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ByteFluffy/object-storage.git"
+    "url": "git+https://github.com/starrank-soft/object-storage.git"
   },
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/",
-    "access": "public"
+    "registry": "https://npm.pkg.github.com"
   },
   "type": "module",
   "files": [
