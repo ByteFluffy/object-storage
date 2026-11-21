@@ -421,8 +421,8 @@ npm run build
 npm run test:package
 ```
 
-`npm run test:integration` 在没有 `OBJECT_STORAGE_LIVE_TEST=1` 时失败退出。配置了 `OBJECT_STORAGE_S3_BUCKET`、`OBJECT_STORAGE_S3_REGION`、`OBJECT_STORAGE_S3_ENDPOINT`、`OBJECT_STORAGE_S3_ACCESS_KEY_ID` 和 `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` 之后，它只对 `@starrank-soft/object-storage-smoke/` 前缀做一次上传、签名、检查和删除。
+`npm run test:integration` 在没有 `OBJECT_STORAGE_LIVE_TEST=1` 时失败退出。配置了 `OBJECT_STORAGE_S3_BUCKET`、`OBJECT_STORAGE_S3_REGION`、`OBJECT_STORAGE_S3_ENDPOINT`、`OBJECT_STORAGE_S3_ACCESS_KEY_ID` 和 `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` 之后，它只对 `object-storage-smoke/` 前缀做一次上传、签名、检查和删除。
 
 ## 不做的事
 
-包不保存云凭证，不改桶规则，不建数据库、队列或常驻轮询。不自动把一个地区的对象拉到另一个地区。不内置某种地区默认格式。迁移到组织 scope 另行决定。
+包不保存云凭证，不改桶规则，不建数据库、队列或常驻轮询。不自动把一个地区的对象拉到另一个地区。不内置某种地区默认格式。
